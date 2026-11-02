@@ -16,15 +16,23 @@ export const CONFIG = {
   launchMax: 1600,
   jumpAssist: 120,
 
-  // angular coupling (DESIGN.md §3.2)
-  kOmega: 0.0005,
+  // --- stable moving-platform coupling (see §3.2 rewrite) ---------------
+  // Horizontal momentum is transferred ONCE on detachment, never per frame.
+  detachDamping: 0.5,     // 0.4..0.6: scalar on inherited horizontal velocity
+  detachMaxVx: 400,       // hard clamp on transferred horizontal velocity (px/s)
+  flickThreshold: 350,    // |window vy| must exceed this (upward) to launch
 
   // wall slide (DESIGN.md §3.6)
   slideMaxFall: 260,
   wallFriction: 0.8,
 
-  // flick velocity smoothing (DESIGN.md §3.1)
-  flickAlpha: 0.5,
+  // Window-velocity smoothing. The EMA weight on the newest raw frame delta:
+  // lower = smoother / more spike rejection. 0.2 ignores most single-frame
+  // jitter while still tracking a sustained drag within a few frames.
+  flickAlpha: 0.2,
+  // Hard sanity clamp on the raw per-frame delta BEFORE it feeds the EMA, so a
+  // single pathological mouse jump can never enter the smoothed estimate.
+  rawDeltaClamp: 2500,    // px/s
 
   agentRadius: 9,
 };

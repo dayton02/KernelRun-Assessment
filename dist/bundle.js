@@ -18,13 +18,25 @@
     // min upward window speed to trigger a launch
     launchMax: 1600,
     jumpAssist: 120,
-    // angular coupling (DESIGN.md §3.2)
-    kOmega: 5e-4,
+    // --- stable moving-platform coupling (see §3.2 rewrite) ---------------
+    // Horizontal momentum is transferred ONCE on detachment, never per frame.
+    detachDamping: 0.5,
+    // 0.4..0.6: scalar on inherited horizontal velocity
+    detachMaxVx: 400,
+    // hard clamp on transferred horizontal velocity (px/s)
+    flickThreshold: 350,
+    // |window vy| must exceed this (upward) to launch
     // wall slide (DESIGN.md §3.6)
     slideMaxFall: 260,
     wallFriction: 0.8,
-    // flick velocity smoothing (DESIGN.md §3.1)
-    flickAlpha: 0.5,
+    // Window-velocity smoothing. The EMA weight on the newest raw frame delta:
+    // lower = smoother / more spike rejection. 0.2 ignores most single-frame
+    // jitter while still tracking a sustained drag within a few frames.
+    flickAlpha: 0.2,
+    // Hard sanity clamp on the raw per-frame delta BEFORE it feeds the EMA, so a
+    // single pathological mouse jump can never enter the smoothed estimate.
+    rawDeltaClamp: 2500,
+    // px/s
     agentRadius: 9
   };
   var ARCH = {
@@ -130,7 +142,8 @@
           grounded: false,
           wall: 0,
           coyote: 0,
-          groundEntity: null
+          groundEntity: null,
+          localOffsetX: 0
         }
       };
     }
@@ -168,7 +181,6 @@
 
   // src/math.ts
   var clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
-  var perp = (p) => ({ x: -p.y, y: p.x });
   var aabbContainsX = (r, x) => x >= r.x && x <= r.x + r.w;
   function sweptCircleAABB(p, r, d, box) {
     const ex = { x: box.x - r, y: box.y - r, w: box.w + 2 * r, h: box.h + 2 * r };
@@ -411,11 +423,11 @@
         w.rect.x = p.x - w.drag.grabDX;
         w.rect.y = p.y - w.drag.grabDY;
       }
-      const instVx = (w.rect.x - px) / dt;
-      const instVy = (w.rect.y - py) / dt;
+      const rawVx = clamp((w.rect.x - px) / dt, -CONFIG.rawDeltaClamp, CONFIG.rawDeltaClamp);
+      const rawVy = clamp((w.rect.y - py) / dt, -CONFIG.rawDeltaClamp, CONFIG.rawDeltaClamp);
       const a = CONFIG.flickAlpha;
-      w.drag.vx = a * instVx + (1 - a) * w.drag.vx;
-      w.drag.vy = a * instVy + (1 - a) * w.drag.vy;
+      w.drag.vx = a * rawVx + (1 - a) * w.drag.vx;
+      w.drag.vy = a * rawVy + (1 - a) * w.drag.vy;
       w.prev.x = px;
       w.prev.y = py;
       w.prev.w = w.rect.w;
@@ -425,31 +437,8 @@
     world.windows = world.windows.filter((w) => w.style.closing < 0.35);
   }
   function agentIntentSystem(world, dt) {
-    const a = world.agent;
-    const s = a.state;
+    const s = world.agent.state;
     if (s.coyote > 0) s.coyote -= dt;
-    if (s.fsm === "PATROLLING" /* PATROLLING */ && s.grounded && s.groundEntity != null) {
-      const gw = world.windows.find((w) => w.id === s.groundEntity);
-      if (gw) {
-        const left = gw.rect.x + a.shape.radius;
-        const right = gw.rect.x + gw.rect.w - a.shape.radius;
-        if (a.tf.pos.x <= left) {
-          s.dir = 1;
-          edgeLeap(world);
-        } else if (a.tf.pos.x >= right) {
-          s.dir = -1;
-          edgeLeap(world);
-        }
-      }
-    }
-  }
-  function edgeLeap(world) {
-    const a = world.agent;
-    a.kin.vel.y = -CONFIG.edgeJumpImpulse;
-    a.kin.vel.x = world.agent.state.dir * CONFIG.patrolSpeed * 1.4;
-    a.state.fsm = "JUMPING" /* JUMPING */;
-    a.state.grounded = false;
-    a.state.groundEntity = null;
   }
   function kinematicsSystem(world, dt) {
     const a = world.agent;
@@ -465,7 +454,9 @@
       a.kin.vel.x = 0;
       a.kin.vel.y = Math.min(a.kin.vel.y, CONFIG.slideMaxFall);
     }
-    a.tf.pos.x += a.kin.vel.x * dt;
+    if (!a.state.grounded) {
+      a.tf.pos.x += a.kin.vel.x * dt;
+    }
     a.tf.pos.y += a.kin.vel.y * dt;
   }
   function collisionSystem(world, dt) {
@@ -485,8 +476,7 @@
         if (rungY != null) {
           a.tf.pos.y = rungY - r;
           a.kin.vel.y = 0;
-          s.grounded = true;
-          s.groundEntity = w.id;
+          attach(world, w);
           landedOn = w;
         }
       }
@@ -506,21 +496,17 @@
         } else {
           a.tf.pos.y = topNow - r;
           a.kin.vel.y = 0;
-          s.grounded = true;
-          s.groundEntity = w.id;
+          a.kin.vel.x = 0;
+          attach(world, w);
           landedOn = w;
-          inheritVelocity(world, w, dt);
-          if (fx.frictionScale != null) a.kin.vel.x *= fx.frictionScale;
-          if (fx.kickVx != null) a.kin.vel.x += fx.kickVx;
           if (fx.support != null && fx.support > 0) {
             a.kin.vel.y = -Math.sqrt(2 * fx.support * 1);
           }
           if (fx.launchVy != null) {
             a.kin.vel.y = fx.launchVy;
             if (fx.forceLaunch) {
+              detach(world, w);
               a.state.fsm = "LAUNCHED" /* LAUNCHED */;
-              s.grounded = false;
-              s.groundEntity = null;
               landedOn = null;
             }
           }
@@ -537,8 +523,7 @@
         if (hit && hit.nx !== 0) {
           a.tf.pos.x = a.tf.prev.x + d.x * hit.t + wdx;
           a.tf.pos.y = a.tf.prev.y + d.y * hit.t + wdy;
-          const vrelx = a.kin.vel.x - w.drag.vx;
-          a.kin.vel.x = vrelx - vrelx + w.drag.vx;
+          a.kin.vel.x = 0;
           newWall = hit.nx < 0 ? -1 : 1;
         } else {
           const nearLeft = Math.abs(a.tf.pos.x - rect.x) < r + 4;
@@ -548,6 +533,28 @@
             newWall = nearLeft ? -1 : 1;
             a.tf.pos.x = nearLeft ? rect.x - r : rect.x + rect.w + r;
           }
+        }
+      }
+    }
+    if (s.grounded && s.groundEntity != null) {
+      const gw = world.windows.find((w) => w.id === s.groundEntity);
+      if (gw) {
+        s.localOffsetX += s.dir * CONFIG.patrolSpeed * dt;
+        const lo = r;
+        const hi = gw.rect.w - r;
+        if (s.localOffsetX <= lo) {
+          s.localOffsetX = lo;
+          s.dir = 1;
+          edgeLeap(world, gw);
+        } else if (s.localOffsetX >= hi) {
+          s.localOffsetX = hi;
+          s.dir = -1;
+          edgeLeap(world, gw);
+        }
+        if (s.grounded) {
+          a.tf.pos.x = gw.rect.x + s.localOffsetX;
+          a.tf.pos.y = gw.rect.y - r;
+          a.kin.vel.x = 0;
         }
       }
     }
@@ -567,25 +574,44 @@
     }
     if (wasGrounded && !s.grounded) s.coyote = CONFIG.coyoteTime;
   }
-  function inheritVelocity(world, w, dt) {
+  function attach(world, w) {
+    const s = world.agent.state;
+    const fresh = !s.grounded || s.groundEntity !== w.id;
+    s.grounded = true;
+    s.groundEntity = w.id;
+    if (fresh) {
+      s.localOffsetX = clamp(
+        world.agent.tf.pos.x - w.rect.x,
+        world.agent.shape.radius,
+        w.rect.w - world.agent.shape.radius
+      );
+    }
+  }
+  function detach(world, w) {
     const a = world.agent;
-    a.kin.vel.x = w.drag.vx + world.agent.state.dir * CONFIG.patrolSpeed;
-    const center = { x: w.rect.x + w.rect.w / 2, y: w.rect.y + w.rect.h / 2 };
-    const rvec = { x: a.tf.pos.x - center.x, y: a.tf.pos.y - center.y };
-    const omega = CONFIG.kOmega * w.drag.vx / dt;
-    const t = perp(rvec);
-    a.kin.vel.x += omega * t.x;
-    a.kin.vel.y += omega * t.y * 0.1;
+    const s = a.state;
+    const inherited = clamp(
+      w.drag.vx * CONFIG.detachDamping,
+      -CONFIG.detachMaxVx,
+      CONFIG.detachMaxVx
+    );
+    a.kin.vel.x = inherited + s.dir * CONFIG.patrolSpeed;
+    s.grounded = false;
+    s.groundEntity = null;
+  }
+  function edgeLeap(world, w) {
+    const a = world.agent;
+    detach(world, w);
+    a.kin.vel.y = -CONFIG.edgeJumpImpulse;
+    a.state.fsm = "JUMPING" /* JUMPING */;
   }
   function tryLaunch(world, w) {
     const a = world.agent;
-    const upSpeed = -w.drag.vy;
-    if (upSpeed > CONFIG.launchMin) {
-      const launch = upSpeed * CONFIG.restitution + CONFIG.jumpAssist;
-      a.kin.vel.y = -clamp(launch, 0, CONFIG.launchMax);
+    const vy = w.drag.vy;
+    if (vy < -CONFIG.flickThreshold) {
+      detach(world, w);
+      a.kin.vel.y = clamp(vy * CONFIG.restitution, -CONFIG.launchMax, 0);
       a.state.fsm = "LAUNCHED" /* LAUNCHED */;
-      a.state.grounded = false;
-      a.state.groundEntity = null;
     }
   }
   function postFsmSystem(world) {

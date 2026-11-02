@@ -4,7 +4,7 @@
 // (RenderSystem lives in render.ts and is not part of the fixed step.)
 import { CONFIG } from './config.js';
 import { FsmState, WindowKind } from './components.js';
-import { aabbContainsX, clamp, perp, sweptCircleAABB } from './math.js';
+import { aabbContainsX, clamp, sweptCircleAABB } from './math.js';
 import { archetypeSystem, archetypeContact, localGravityMultiplier, terminalRungContact, bsodDismiss, } from './archetypes.js';
 // ---------------------------------------------------------------------------
 // 1. InputSystem — translate pointer edges into window grab/close intent.
@@ -50,12 +50,15 @@ export function windowSystem(world, dt) {
             w.rect.x = p.x - w.drag.grabDX;
             w.rect.y = p.y - w.drag.grabDY;
         }
-        // instantaneous velocity from finite difference, then EMA smoothing (§3.1)
-        const instVx = (w.rect.x - px) / dt;
-        const instVy = (w.rect.y - py) / dt;
+        // Raw per-frame delta -> CLAMP -> EMA smoothing. (Bug 2 fix.)
+        // Clamping the raw delta first means a single pathological mouse jump
+        // cannot inject a spike into the smoothed estimate; the EMA then rejects
+        // ordinary frame-to-frame jitter. Both stages run before anything reads vx.
+        const rawVx = clamp((w.rect.x - px) / dt, -CONFIG.rawDeltaClamp, CONFIG.rawDeltaClamp);
+        const rawVy = clamp((w.rect.y - py) / dt, -CONFIG.rawDeltaClamp, CONFIG.rawDeltaClamp);
         const a = CONFIG.flickAlpha;
-        w.drag.vx = a * instVx + (1 - a) * w.drag.vx;
-        w.drag.vy = a * instVy + (1 - a) * w.drag.vy;
+        w.drag.vx = a * rawVx + (1 - a) * w.drag.vx;
+        w.drag.vy = a * rawVy + (1 - a) * w.drag.vy;
         w.prev.x = px;
         w.prev.y = py;
         w.prev.w = w.rect.w;
@@ -70,34 +73,12 @@ export function windowSystem(world, dt) {
 // 3. AgentIntentSystem — FSM transitions that depend only on state/timers.
 // ---------------------------------------------------------------------------
 export function agentIntentSystem(world, dt) {
-    const a = world.agent;
-    const s = a.state;
+    const s = world.agent.state;
+    // Patrol + edge handling now lives in the collision pin block (it needs the
+    // final grounded state and window position). Here we only age the coyote
+    // timer. This keeps the FSM's time-based concerns separate from contacts.
     if (s.coyote > 0)
         s.coyote -= dt;
-    if (s.fsm === FsmState.PATROLLING && s.grounded && s.groundEntity != null) {
-        const gw = world.windows.find((w) => w.id === s.groundEntity);
-        if (gw) {
-            // Patrol along the title bar; flip and leap at the edges.
-            const left = gw.rect.x + a.shape.radius;
-            const right = gw.rect.x + gw.rect.w - a.shape.radius;
-            if (a.tf.pos.x <= left) {
-                s.dir = 1;
-                edgeLeap(world);
-            }
-            else if (a.tf.pos.x >= right) {
-                s.dir = -1;
-                edgeLeap(world);
-            }
-        }
-    }
-}
-function edgeLeap(world) {
-    const a = world.agent;
-    a.kin.vel.y = -CONFIG.edgeJumpImpulse;
-    a.kin.vel.x = world.agent.state.dir * CONFIG.patrolSpeed * 1.4;
-    a.state.fsm = FsmState.JUMPING;
-    a.state.grounded = false;
-    a.state.groundEntity = null;
 }
 // ---------------------------------------------------------------------------
 // 4. KinematicsSystem — semi-implicit Euler (DESIGN.md Part 3 preamble).
@@ -120,8 +101,14 @@ export function kinematicsSystem(world, dt) {
         a.kin.vel.x = 0;
         a.kin.vel.y = Math.min(a.kin.vel.y, CONFIG.slideMaxFall);
     }
-    a.tf.pos.x += a.kin.vel.x * dt; // …then position uses new velocity
-    a.tf.pos.y += a.kin.vel.y * dt;
+    // Horizontal: while grounded the ball is pinned to the window in LOCAL
+    // coordinates by the collision system, so we must NOT integrate vel.x here
+    // (doing so is what let window motion leak into the ball every frame).
+    // Vertical always integrates so gravity / launches still work.
+    if (!a.state.grounded) {
+        a.tf.pos.x += a.kin.vel.x * dt;
+    }
+    a.tf.pos.y += a.kin.vel.y * dt; // position uses the new velocity (symplectic)
 }
 // ---------------------------------------------------------------------------
 // 5. CollisionSystem — support field + CCD + inheritance (DESIGN.md §3.2-3.5)
@@ -146,8 +133,7 @@ export function collisionSystem(world, dt) {
             if (rungY != null) {
                 a.tf.pos.y = rungY - r;
                 a.kin.vel.y = 0;
-                s.grounded = true;
-                s.groundEntity = w.id;
+                attach(world, w); // pin in local coords (sets offset if new)
                 landedOn = w;
             }
         }
@@ -177,15 +163,11 @@ export function collisionSystem(world, dt) {
             else {
                 a.tf.pos.y = topNow - r; // snap feet to the bar
                 a.kin.vel.y = 0;
-                s.grounded = true;
-                s.groundEntity = w.id;
+                a.kin.vel.x = 0; // grounded: horizontal is owned by offset
+                attach(world, w); // pin in local coords (sets offset if new)
                 landedOn = w;
-                inheritVelocity(world, w, dt);
-                // archetype overrides layered on top of default inheritance
-                if (fx.frictionScale != null)
-                    a.kin.vel.x *= fx.frictionScale;
-                if (fx.kickVx != null)
-                    a.kin.vel.x += fx.kickVx;
+                // archetype overrides that act on contact. NOTE: no per-frame window
+                // velocity is ever added to vel.x here (that was the runaway bug).
                 if (fx.support != null && fx.support > 0) {
                     // buoyancy: upward support lifts the packet off the surface
                     a.kin.vel.y = -Math.sqrt(2 * fx.support * 1); // impulse-like float
@@ -193,9 +175,8 @@ export function collisionSystem(world, dt) {
                 if (fx.launchVy != null) {
                     a.kin.vel.y = fx.launchVy;
                     if (fx.forceLaunch) {
+                        detach(world, w); // single-frame momentum transfer + airborne
                         a.state.fsm = FsmState.LAUNCHED;
-                        s.grounded = false;
-                        s.groundEntity = null;
                         landedOn = null;
                     }
                 }
@@ -212,12 +193,13 @@ export function collisionSystem(world, dt) {
             };
             const hit = sweptCircleAABB(a.tf.prev, r, d, rect);
             if (hit && (hit.nx !== 0)) {
-                // advance to time of impact, cancel the into-surface component,
-                // then re-add the window velocity (that re-add IS the inheritance).
+                // advance to time of impact and cancel the normal (x) component of the
+                // RELATIVE velocity. We deliberately do NOT re-add window.vx to vel.x:
+                // a wall contact should stop horizontal motion, not inherit the drag
+                // (re-adding it was a second velocity-leak path).
                 a.tf.pos.x = a.tf.prev.x + d.x * hit.t + wdx;
                 a.tf.pos.y = a.tf.prev.y + d.y * hit.t + wdy;
-                const vrelx = a.kin.vel.x - w.drag.vx;
-                a.kin.vel.x = (vrelx - vrelx) + w.drag.vx; // normal (x) component removed
+                a.kin.vel.x = 0;
                 newWall = hit.nx < 0 ? -1 : 1;
             }
             else {
@@ -229,6 +211,36 @@ export function collisionSystem(world, dt) {
                     newWall = nearLeft ? -1 : 1;
                     a.tf.pos.x = nearLeft ? rect.x - r : rect.x + rect.w + r;
                 }
+            }
+        }
+    }
+    // --- LOCAL-COORDINATE PIN + PATROL (§1 of the rewrite) -----------------
+    // If still attached to a window, lock position to it via the offset and
+    // advance the offset by the ball's OWN patrol speed. The ball never reads
+    // window velocity here, so a drag can't accumulate into ball.vel.x.
+    if (s.grounded && s.groundEntity != null) {
+        const gw = world.windows.find((w) => w.id === s.groundEntity);
+        if (gw) {
+            // advance local patrol
+            s.localOffsetX += s.dir * CONFIG.patrolSpeed * dt;
+            // clamp offset to the title-bar span; flip + leap at the edges
+            const lo = r;
+            const hi = gw.rect.w - r;
+            if (s.localOffsetX <= lo) {
+                s.localOffsetX = lo;
+                s.dir = 1;
+                edgeLeap(world, gw);
+            }
+            else if (s.localOffsetX >= hi) {
+                s.localOffsetX = hi;
+                s.dir = -1;
+                edgeLeap(world, gw);
+            }
+            // still grounded after the (possible) leap? pin absolutely to the window.
+            if (s.grounded) {
+                a.tf.pos.x = gw.rect.x + s.localOffsetX; // THE lock
+                a.tf.pos.y = gw.rect.y - r; // ride vertical motion too
+                a.kin.vel.x = 0; // no residual horizontal vel
             }
         }
     }
@@ -253,27 +265,56 @@ export function collisionSystem(world, dt) {
     if (wasGrounded && !s.grounded)
         s.coyote = CONFIG.coyoteTime;
 }
-function inheritVelocity(world, w, dt) {
-    const a = world.agent;
-    // linear inheritance (§3.2)
-    a.kin.vel.x = w.drag.vx + world.agent.state.dir * CONFIG.patrolSpeed;
-    // angular term: tangential nudge about window center (§3.2)
-    const center = { x: w.rect.x + w.rect.w / 2, y: w.rect.y + w.rect.h / 2 };
-    const rvec = { x: a.tf.pos.x - center.x, y: a.tf.pos.y - center.y };
-    const omega = CONFIG.kOmega * (w.drag.vx) / dt;
-    const t = perp(rvec);
-    a.kin.vel.x += omega * t.x;
-    a.kin.vel.y += omega * t.y * 0.1; // damp vertical component
+/**
+ * Attach the ball to a window in LOCAL coordinates. If this is a NEW
+ * attachment (different window, or was airborne), capture the current contact
+ * point as the local offset so the ball doesn't teleport. No velocity is
+ * transferred on attach — grounded horizontal motion is purely the offset.
+ */
+function attach(world, w) {
+    const s = world.agent.state;
+    const fresh = !s.grounded || s.groundEntity !== w.id;
+    s.grounded = true;
+    s.groundEntity = w.id;
+    if (fresh) {
+        s.localOffsetX = clamp(world.agent.tf.pos.x - w.rect.x, world.agent.shape.radius, w.rect.w - world.agent.shape.radius);
+    }
 }
+/**
+ * Detach from a window and transfer horizontal momentum ONCE, at this exact
+ * frame (§2 of the rewrite). The transferred velocity is the smoothed window
+ * velocity times a damping scalar, hard-clamped to ±detachMaxVx. The ball's
+ * own patrol direction is added so a clean walk-off still moves it.
+ */
+function detach(world, w) {
+    const a = world.agent;
+    const s = a.state;
+    // one-shot inherited horizontal velocity: damped + clamped window velocity
+    const inherited = clamp(w.drag.vx * CONFIG.detachDamping, -CONFIG.detachMaxVx, CONFIG.detachMaxVx);
+    a.kin.vel.x = inherited + s.dir * CONFIG.patrolSpeed;
+    s.grounded = false;
+    s.groundEntity = null;
+}
+/** Walk-off / edge jump: detach (transfer once) then apply the jump impulse. */
+function edgeLeap(world, w) {
+    const a = world.agent;
+    detach(world, w); // single momentum transfer
+    a.kin.vel.y = -CONFIG.edgeJumpImpulse;
+    a.state.fsm = FsmState.JUMPING;
+}
+/**
+ * Trampoline / springboard flick (§4 of the rewrite). Only launches when the
+ * window's UPWARD velocity exceeds the threshold. Launch velocity is the
+ * window velocity times restitution (clamped), and the ball detaches into the
+ * airborne LAUNCHED state in the same frame.
+ */
 function tryLaunch(world, w) {
     const a = world.agent;
-    const upSpeed = -w.drag.vy; // positive when window moves up
-    if (upSpeed > CONFIG.launchMin) {
-        const launch = upSpeed * CONFIG.restitution + CONFIG.jumpAssist;
-        a.kin.vel.y = -clamp(launch, 0, CONFIG.launchMax);
+    const vy = w.drag.vy; // negative when the window moves up
+    if (vy < -CONFIG.flickThreshold) { // fast enough upward flick
+        detach(world, w); // one-shot horizontal transfer too
+        a.kin.vel.y = clamp(vy * CONFIG.restitution, -CONFIG.launchMax, 0);
         a.state.fsm = FsmState.LAUNCHED;
-        a.state.grounded = false;
-        a.state.groundEntity = null;
     }
 }
 // ---------------------------------------------------------------------------

@@ -22,6 +22,11 @@ export interface AgentState {
   wall: -1 | 0 | 1;     // which side border we cling to
   coyote: number;       // seconds of late-jump grace remaining
   groundEntity: number | null;
+  // Local-coordinate grounding: while grounded the ball is pinned to the
+  // window via this offset (ball.pos.x = window.x + localOffsetX). The ball's
+  // own patrol advances the OFFSET, never ball.vel.x. This removes the runaway
+  // velocity-coupling accumulator entirely. (See kinematics/collision rewrite.)
+  localOffsetX: number;
 }
 
 // --- Window (a platform) ---

@@ -44,6 +44,7 @@ export class World {
                 wall: 0,
                 coyote: 0,
                 groundEntity: null,
+                localOffsetX: 0,
             },
         };
     }
