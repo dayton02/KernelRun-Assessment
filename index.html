@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Desktop Trampoline — prototype</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; background: #060912; color: #cfd8ec;
+    font-family: system-ui, sans-serif; display: flex; flex-direction: column;
+    align-items: center; gap: 12px; padding: 16px;
+  }
+  h1 { font-size: 16px; font-weight: 600; margin: 4px 0; letter-spacing: .3px; }
+  p.sub { margin: 0; color: #8a96b4; font-size: 13px; max-width: 820px; text-align: center; }
+  canvas {
+    background: #0b1020; border: 1px solid #243; border-radius: 8px;
+    box-shadow: 0 8px 40px rgba(0,0,0,.5); touch-action: none; cursor: grab;
+  }
+  canvas:active { cursor: grabbing; }
+  code { background: #121a2e; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <h1>Desktop Trampoline</h1>
+  <p class="sub">
+    You don't control the packet. Drag window <b>title bars</b> to build
+    platforms, <b>flick a window upward</b> to trampoline-launch the packet, and
+    click the red <code>x</code> to close a window out from under it. Title bars
+    are one-way; side borders are wall-slide surfaces.
+  </p>
+  <canvas id="stage" width="820" height="620"></canvas>
+
+  <!-- zero-build: load compiled ES modules directly -->
+  <script type="module" src="./dist/main.js"></script>
+</body>
+</html>

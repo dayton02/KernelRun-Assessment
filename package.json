@@ -1,0 +1,13 @@
+{
+  "name": "desktop-trampoline",
+  "version": "0.1.0",
+  "description": "Platforming-as-window-management prototype (ECS + CCD).",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}
