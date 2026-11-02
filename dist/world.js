@@ -55,6 +55,7 @@ export class World {
                 coyote: 0,
                 groundEntity: null,
                 localOffsetX: 0,
+                spawnDwell: 0,
             },
         };
     }

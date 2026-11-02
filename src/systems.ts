@@ -22,27 +22,27 @@ export function inputSystem(world: World): void {
   if (p.pressed) {
     const win = world.topWindowAt(p.x, p.y);
     if (win) {
-      // Close box lives at the right end of the title bar.
-      const closeX = win.rect.x + win.rect.w - 20;
-      const onCloseBox = p.x >= closeX && p.y <= win.rect.y + win.drag.titleBarH;
-      if (onCloseBox && win.arch.protectedWin) {
-        // SPAWN / SINK are system-reserved: cannot be closed. Grab instead so
-        // the player can still reposition them.
-        win.drag.grabbed = true;
-        win.drag.grabDX = p.x - win.rect.x;
-        win.drag.grabDY = p.y - win.rect.y;
-        world.bringToFront(win);
-      } else if (onCloseBox) {
-        if (win.arch.kind === WindowKind.BSOD) {
-          bsodDismiss(world, win, p.x);   // explosive dismissal (§5.4)
-        } else {
-          win.style.closing = 0.0001;     // begin fade -> disappearing platform
-        }
+      if (win.arch.protectedWin) {
+        // SPAWN / SINK are system-reserved and fully IMMOVABLE: the player can
+        // neither drag nor close them. Clicking them does nothing. This stops
+        // the player from repositioning the goal under the packet.
+        // (intentionally no-op)
       } else {
-        win.drag.grabbed = true;
-        win.drag.grabDX = p.x - win.rect.x;
-        win.drag.grabDY = p.y - win.rect.y;
-        world.bringToFront(win);
+        // Close box lives at the right end of the title bar.
+        const closeX = win.rect.x + win.rect.w - 20;
+        const onCloseBox = p.x >= closeX && p.y <= win.rect.y + win.drag.titleBarH;
+        if (onCloseBox) {
+          if (win.arch.kind === WindowKind.BSOD) {
+            bsodDismiss(world, win, p.x);   // explosive dismissal (§5.4)
+          } else {
+            win.style.closing = 0.0001;     // begin fade -> disappearing platform
+          }
+        } else {
+          win.drag.grabbed = true;
+          win.drag.grabDX = p.x - win.rect.x;
+          win.drag.grabDY = p.y - win.rect.y;
+          world.bringToFront(win);
+        }
       }
     }
   }
@@ -284,6 +284,34 @@ export function collisionSystem(world: World, dt: number): void {
         return;                       // skip the pin this frame
       }
 
+      // --- SOURCE AUTO-EJECT (Download_Manager) ------------------------
+      // The source is a LAUNCHER, not a patrol surface. The packet rests on it
+      // (centered) for a short dwell, then is ejected in a diagonal arc toward
+      // the goal side. It never patrols or edge-leaps off the source, so it
+      // can't get stuck bouncing back and forth on the fixed, undraggable
+      // window — the player's job is to CATCH and relay it onward.
+      if (gw.arch.kind === WindowKind.SPAWN) {
+        s.spawnDwell += dt;
+        if (s.spawnDwell >= GAME.spawn.dwell) {
+          s.spawnDwell = 0;
+          detach(world, gw);
+          const toCenter = (gw.rect.x + gw.rect.w / 2) < world.width / 2 ? 1 : -1;
+          a.kin.vel.x = toCenter * GAME.spawn.ejectVx;
+          a.kin.vel.y = GAME.spawn.ejectVy;
+          a.state.fsm = FsmState.LAUNCHED;
+          cueLaunch();
+          s.wall = newWall;
+          return;                      // ejected: skip the pin this frame
+        }
+        // hold the packet centered on the source while it "downloads"
+        s.localOffsetX = gw.rect.w / 2;
+        a.tf.pos.x = gw.rect.x + s.localOffsetX;
+        a.tf.pos.y = gw.rect.y - r;
+        a.kin.vel.x = 0;
+        s.wall = newWall;
+        return;                        // no patrol/edge-leap on the source
+      }
+
       // advance local patrol
       s.localOffsetX += s.dir * CONFIG.patrolSpeed * dt;
 
@@ -342,7 +370,7 @@ function attach(world: World, w: Win): void {
       world.agent.shape.radius,
       w.rect.w - world.agent.shape.radius,
     );
-    cueLand();   // blip on a fresh landing
+    cueLand();          // blip on a fresh landing
   }
 }
 
@@ -366,6 +394,7 @@ function detach(world: World, w: Win): void {
 
   s.grounded = false;
   s.groundEntity = null;
+  s.spawnDwell = 0;   // leaving a window resets the source dwell timer
 }
 
 /** Walk-off / edge jump: detach (transfer once) then apply the jump impulse. */

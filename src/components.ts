@@ -27,6 +27,9 @@ export interface AgentState {
   // own patrol advances the OFFSET, never ball.vel.x. This removes the runaway
   // velocity-coupling accumulator entirely. (See kinematics/collision rewrite.)
   localOffsetX: number;
+  // Dwell timer while grounded on the SPAWN window. When it elapses the source
+  // auto-ejects the packet toward the goal, so it never idles on the source.
+  spawnDwell: number;
 }
 
 // --- Window (a platform) ---

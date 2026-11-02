@@ -590,8 +590,8 @@ the local-coordinate fix is preserved.
 
 | Element | Window | Rule |
 |---------|--------|------|
-| Source | `Download_Manager` (SPAWN) | emits the packet from a fixed port; protected (cannot be closed, free RAM) |
-| Goal | `Backup_Drive (D:)` (SINK) | its body below the title bar is an **active drop zone**; packet overlap ⇒ WIN |
+| Source | `Download_Manager` (SPAWN) | immovable launcher: holds the packet for a short dwell then **auto-ejects it in an arc toward the goal side** (it never patrols/edge-leaps off the source, so it can't idle bouncing on a fixed window); free RAM |
+| Goal | `Backup_Drive (D:)` (SINK) | its body below the title bar is an **active drop zone**; packet overlap ⇒ WIN. Immovable, and **relocates to a random right-side edge after every delivery** (platforms + integrity carry over) |
 | Fail line | taskbar (screen bottom) | packet falling below the taskbar top costs **Data Integrity** |
 
 - **Win:** `overlapsDropZone()` (AABB vs. the sink body). Triggers a short
@@ -731,9 +731,41 @@ their whole platform layout (and their footing) to the GC. This reinforces the
 "close windows" pillar that the static RAM cap alone did not pressure hard
 enough.
 
-### 7.4 Verification
+### 7.4 Immovable, relocating goal
 
-A 14-check headless suite covers all three: slow-drag keeps footing while
+The slip rule stops ferrying the packet, but the **goal** was a second ferry
+vector: the sink is "protected," yet the input handler still let the player grab
+and reposition it — so you could slide the goal under the packet instead. Two
+changes close this:
+
+- **Fully immovable protected windows.** `inputSystem` now no-ops on any click
+  to a `protectedWin` (spawn/sink): no grab, no close. Combined with
+  `windowSystem` only moving `grabbed` windows, the goal cannot be repositioned
+  by any path.
+- **Random relocation after delivery.** On a win, `relocateSink()` moves the
+  sink to a fresh `randomSinkPosition()` — always on the **right** of the
+  firewall and within the legal band (below the HUD, above the taskbar) — and
+  re-emits the packet. The player's platform layout and Data Integrity carry
+  over, so deliveries chain into a continuous run with a new target each time.
+  `prev` is reset on the jump so the teleport imparts no phantom window
+  velocity.
+
+Together these mean the only way to score is the intended loop: build a path,
+flick the packet across the firewall, and land it in a goal you cannot move.
+
+**Source as a launcher.** Because the source is also immovable, a packet that
+merely patrolled it would bounce back and forth forever with no way off. So the
+SPAWN window is handled specially in the pin block: it does **not** patrol or
+edge-leap. Instead it holds the packet centered for `spawn.dwell` seconds (a
+"downloading" charge, shown as a bar), then auto-ejects it in a diagonal arc
+(`spawn.ejectVx/ejectVy`) toward the goal side. The dwell timer (`spawnDwell` on
+the agent) resets on detach, so a packet that lands back on the source simply
+charges and re-ejects — no soft-lock. This turns the fixed source from a
+dead-end into the opening beat of each run.
+
+### 7.5 Verification
+
+A headless suite covers all of this: slow-drag keeps footing while
 fast-drag slips with zero horizontal velocity (and an upward flick still
 launches, not slips); left/right windows clamp exactly to the barrier faces
 while an airborne packet crosses; RAM leaks at the exact `0.5%·count` rate,

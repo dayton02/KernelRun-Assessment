@@ -184,7 +184,7 @@ function drawArchetype(ctx: CanvasRenderingContext2D, w: Win): void {
       ctx.fillRect(r.x + r.w - 10, r.y - 6, 10, 10);
       ctx.fillStyle = '#9fb0d0';
       ctx.font = '11px ui-monospace, monospace';
-      ctx.fillText('↓ downloading packet...', r.x + 10, r.y + r.h / 2);
+      ctx.fillText('↓ downloading → EJECT →', r.x + 10, r.y + r.h / 2);
       break;
     }
     case WindowKind.SINK: {
@@ -325,6 +325,16 @@ function drawGameHud(ctx: CanvasRenderingContext2D, world: World, g: GameState):
     const tw = ctx.measureText(g.message).width;
     ctx.fillText(g.message, (world.width - tw) / 2, world.height / 2 - 40);
     ctx.globalAlpha = 1;
+  }
+
+  // source eject-charge bar: shows the dwell filling while the packet is held
+  const spawn = world.windows.find((w) => w.id === g.spawnId);
+  if (spawn && world.agent.state.grounded && world.agent.state.groundEntity === spawn.id) {
+    const frac = Math.min(1, world.agent.state.spawnDwell / GAME.spawn.dwell);
+    ctx.fillStyle = 'rgba(127,208,255,0.25)';
+    ctx.fillRect(spawn.rect.x, spawn.rect.y - 8, spawn.rect.w, 5);
+    ctx.fillStyle = '#7fd0ff';
+    ctx.fillRect(spawn.rect.x, spawn.rect.y - 8, spawn.rect.w * frac, 5);
   }
 
   // sink affordance hint arrow when far

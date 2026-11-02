@@ -142,8 +142,20 @@
       // +50% launch restitution if flicked before expiry
     },
     // win handling
-    winFreeze: 1.2
+    winFreeze: 1.2,
     // seconds of celebration before level reset
+    // Source auto-eject (Download_Manager). The packet does not idle-patrol the
+    // source forever: after a short dwell it is ejected in a diagonal arc toward
+    // the goal side, so the player relays it onward (catch -> flick) instead of
+    // trying to coax it off a fixed, undraggable window.
+    spawn: {
+      dwell: 0.9,
+      // seconds grounded on the source before ejection
+      ejectVx: 340,
+      // horizontal eject speed (toward the goal side)
+      ejectVy: -720
+      // upward component of the eject arc
+    }
   };
 
   // src/world.ts
@@ -199,7 +211,8 @@
           wall: 0,
           coyote: 0,
           groundEntity: null,
-          localOffsetX: 0
+          localOffsetX: 0,
+          spawnDwell: 0
         }
       };
     }
@@ -526,24 +539,22 @@
     if (p.pressed) {
       const win = world.topWindowAt(p.x, p.y);
       if (win) {
-        const closeX = win.rect.x + win.rect.w - 20;
-        const onCloseBox = p.x >= closeX && p.y <= win.rect.y + win.drag.titleBarH;
-        if (onCloseBox && win.arch.protectedWin) {
-          win.drag.grabbed = true;
-          win.drag.grabDX = p.x - win.rect.x;
-          win.drag.grabDY = p.y - win.rect.y;
-          world.bringToFront(win);
-        } else if (onCloseBox) {
-          if (win.arch.kind === "BSOD" /* BSOD */) {
-            bsodDismiss(world, win, p.x);
-          } else {
-            win.style.closing = 1e-4;
-          }
+        if (win.arch.protectedWin) {
         } else {
-          win.drag.grabbed = true;
-          win.drag.grabDX = p.x - win.rect.x;
-          win.drag.grabDY = p.y - win.rect.y;
-          world.bringToFront(win);
+          const closeX = win.rect.x + win.rect.w - 20;
+          const onCloseBox = p.x >= closeX && p.y <= win.rect.y + win.drag.titleBarH;
+          if (onCloseBox) {
+            if (win.arch.kind === "BSOD" /* BSOD */) {
+              bsodDismiss(world, win, p.x);
+            } else {
+              win.style.closing = 1e-4;
+            }
+          } else {
+            win.drag.grabbed = true;
+            win.drag.grabDX = p.x - win.rect.x;
+            win.drag.grabDY = p.y - win.rect.y;
+            world.bringToFront(win);
+          }
         }
       }
     }
@@ -696,6 +707,26 @@
           s.wall = newWall;
           return;
         }
+        if (gw.arch.kind === "SPAWN" /* SPAWN */) {
+          s.spawnDwell += dt;
+          if (s.spawnDwell >= GAME.spawn.dwell) {
+            s.spawnDwell = 0;
+            detach(world, gw);
+            const toCenter = gw.rect.x + gw.rect.w / 2 < world.width / 2 ? 1 : -1;
+            a.kin.vel.x = toCenter * GAME.spawn.ejectVx;
+            a.kin.vel.y = GAME.spawn.ejectVy;
+            a.state.fsm = "LAUNCHED" /* LAUNCHED */;
+            cueLaunch();
+            s.wall = newWall;
+            return;
+          }
+          s.localOffsetX = gw.rect.w / 2;
+          a.tf.pos.x = gw.rect.x + s.localOffsetX;
+          a.tf.pos.y = gw.rect.y - r;
+          a.kin.vel.x = 0;
+          s.wall = newWall;
+          return;
+        }
         s.localOffsetX += s.dir * CONFIG.patrolSpeed * dt;
         const lo = r;
         const hi = gw.rect.w - r;
@@ -756,6 +787,7 @@
     a.kin.vel.x = inherited + s.dir * CONFIG.patrolSpeed;
     s.grounded = false;
     s.groundEntity = null;
+    s.spawnDwell = 0;
   }
   function edgeLeap(world, w) {
     const a = world.agent;
@@ -816,11 +848,38 @@
       gcSweeps: 0
     };
   }
+  var SINK_W = 200;
+  var SINK_H = 150;
+  function randomSinkPosition(world) {
+    const barR = world.firewallX + world.firewallW / 2;
+    const minX = barR + 30;
+    const maxX = world.width - SINK_W - 10;
+    const topMin = 70;
+    const botMax = world.height - GAME.taskbarH - SINK_H - 10;
+    const x = minX + Math.random() * Math.max(0, maxX - minX);
+    const edge = Math.floor(Math.random() * 3);
+    let y;
+    if (edge === 0) y = topMin;
+    else if (edge === 1) y = (topMin + botMax) / 2;
+    else y = botMax;
+    y = Math.max(topMin, Math.min(botMax, y));
+    return { x: Math.max(minX, Math.min(maxX, x)), y };
+  }
+  function relocateSink(world, g) {
+    const sink = world.windows.find((w) => w.id === g.sinkId);
+    if (!sink) return;
+    const pos = randomSinkPosition(world);
+    sink.rect.x = pos.x;
+    sink.rect.y = pos.y;
+    sink.prev.x = pos.x;
+    sink.prev.y = pos.y;
+  }
   function buildLevel(world, g) {
     world.windows = [];
     const spawn = world.spawnWindow(40, 110, 190, 96, "Download_Manager", 205, "SPAWN" /* SPAWN */);
     g.spawnId = spawn.id;
-    const sink = world.spawnWindow(world.width - 230, world.height - 220, 200, 150, "Backup_Drive (D:)", 135, "SINK" /* SINK */);
+    const pos = randomSinkPosition(world);
+    const sink = world.spawnWindow(pos.x, pos.y, SINK_W, SINK_H, "Backup_Drive (D:)", 135, "SINK" /* SINK */);
     g.sinkId = sink.id;
     world.spawnWindow(300, 250, 170, 110, "bash", 150, "TERMINAL" /* TERMINAL */);
     world.spawnWindow(520, 320, 150, 110, "player.fm", 320, "MEDIA" /* MEDIA */);
@@ -853,6 +912,7 @@
     a.state.groundEntity = null;
     a.state.localOffsetX = 0;
     a.state.dir = 1;
+    a.state.spawnDwell = 0;
   }
   function baseRam(world) {
     let ram = 0;
@@ -905,7 +965,8 @@
         }
         if (g.phase === "WON" /* WON */) {
           g.wins++;
-          buildLevel(world, g);
+          relocateSink(world, g);
+          placePacketAtSpawn(world, g);
         }
         g.phase = "PLAYING" /* PLAYING */;
       }
@@ -1124,7 +1185,7 @@
         ctx2.fillRect(r.x + r.w - 10, r.y - 6, 10, 10);
         ctx2.fillStyle = "#9fb0d0";
         ctx2.font = "11px ui-monospace, monospace";
-        ctx2.fillText("\u2193 downloading packet...", r.x + 10, r.y + r.h / 2);
+        ctx2.fillText("\u2193 downloading \u2192 EJECT \u2192", r.x + 10, r.y + r.h / 2);
         break;
       }
       case "SINK" /* SINK */: {
@@ -1258,6 +1319,14 @@
       const tw = ctx2.measureText(g.message).width;
       ctx2.fillText(g.message, (world.width - tw) / 2, world.height / 2 - 40);
       ctx2.globalAlpha = 1;
+    }
+    const spawn = world.windows.find((w) => w.id === g.spawnId);
+    if (spawn && world.agent.state.grounded && world.agent.state.groundEntity === spawn.id) {
+      const frac = Math.min(1, world.agent.state.spawnDwell / GAME.spawn.dwell);
+      ctx2.fillStyle = "rgba(127,208,255,0.25)";
+      ctx2.fillRect(spawn.rect.x, spawn.rect.y - 8, spawn.rect.w, 5);
+      ctx2.fillStyle = "#7fd0ff";
+      ctx2.fillRect(spawn.rect.x, spawn.rect.y - 8, spawn.rect.w * frac, 5);
     }
     const sink = world.windows.find((w) => w.id === g.sinkId);
     const a = world.agent;

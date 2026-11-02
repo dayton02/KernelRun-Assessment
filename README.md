@@ -12,8 +12,12 @@ Full design rationale, ECS layout, state tables, and the physics math are in
 ## The game — Kernel Run
 
 - **Objective:** move the packet from **Download_Manager** (source) to the
-  **Backup_Drive (D:)** drop zone (goal). Reaching the green drop zone wins and
-  advances the level.
+  **Backup_Drive (D:)** drop zone (goal). The source is a **launcher**: it holds
+  the packet briefly (watch the charge bar), then **auto-ejects it in an arc
+  toward the goal side** — so you catch and relay it onward rather than coax it
+  off a fixed window. The goal is **immovable** and **relocates to a random
+  right-side edge after every delivery**. Platforms and Data Integrity carry
+  over between deliveries.
 - **Data Integrity (starts 100%):** every time the packet falls past the
   **taskbar** at the bottom, you lose 25%. At 0% the packet dissolves and
   restarts at the source.

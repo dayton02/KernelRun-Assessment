@@ -100,5 +100,14 @@ export const GAME = {
     },
     // win handling
     winFreeze: 1.2, // seconds of celebration before level reset
+    // Source auto-eject (Download_Manager). The packet does not idle-patrol the
+    // source forever: after a short dwell it is ejected in a diagonal arc toward
+    // the goal side, so the player relays it onward (catch -> flick) instead of
+    // trying to coax it off a fixed, undraggable window.
+    spawn: {
+        dwell: 0.9, // seconds grounded on the source before ejection
+        ejectVx: 340, // horizontal eject speed (toward the goal side)
+        ejectVy: -720, // upward component of the eject arc
+    },
 };
 //# sourceMappingURL=config.js.map

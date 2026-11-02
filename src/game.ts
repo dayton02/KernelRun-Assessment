@@ -48,6 +48,42 @@ export function makeGameState(): GameState {
   };
 }
 
+const SINK_W = 200;
+const SINK_H = 150;
+
+/**
+ * Pick a random landing spot for the sink. It always sits on the RIGHT side of
+ * the firewall (so the flick-across-the-firewall challenge is preserved) and is
+ * anchored to one of three edges — top-right, right-middle, or bottom-right —
+ * so the player must re-aim the flick after every delivery.
+ */
+export function randomSinkPosition(world: World): { x: number; y: number } {
+  const barR = world.firewallX + world.firewallW / 2;
+  const minX = barR + 30;
+  const maxX = world.width - SINK_W - 10;
+  const topMin = 70;                                   // below the HUD
+  const botMax = world.height - GAME.taskbarH - SINK_H - 10;
+
+  const x = minX + Math.random() * Math.max(0, maxX - minX);
+  // bias toward the three edges for variety, clamp into the legal band
+  const edge = Math.floor(Math.random() * 3);
+  let y: number;
+  if (edge === 0) y = topMin;                          // top-right
+  else if (edge === 1) y = (topMin + botMax) / 2;      // right-middle
+  else y = botMax;                                     // bottom-right
+  y = Math.max(topMin, Math.min(botMax, y));
+  return { x: Math.max(minX, Math.min(maxX, x)), y };
+}
+
+/** Relocate the existing sink to a fresh random edge (after a delivery). */
+export function relocateSink(world: World, g: GameState): void {
+  const sink = world.windows.find((w) => w.id === g.sinkId);
+  if (!sink) return;
+  const pos = randomSinkPosition(world);
+  sink.rect.x = pos.x; sink.rect.y = pos.y;
+  sink.prev.x = pos.x; sink.prev.y = pos.y;   // no phantom velocity from the jump
+}
+
 /** Build the level: spawn + sink + a few starter platforms. Idempotent-ish:
  *  it clears existing windows and reseeds. */
 export function buildLevel(world: World, g: GameState): void {
@@ -57,8 +93,10 @@ export function buildLevel(world: World, g: GameState): void {
   const spawn = world.spawnWindow(40, 110, 190, 96, 'Download_Manager', 205, WindowKind.SPAWN);
   g.spawnId = spawn.id;
 
-  // SINK — Backup_Drive (D:), far side, with an active drop zone (the body)
-  const sink = world.spawnWindow(world.width - 230, world.height - 220, 200, 150, 'Backup_Drive (D:)', 135, WindowKind.SINK);
+  // SINK — Backup_Drive (D:), at a random right-side edge, with an active drop
+  // zone (the body). Immovable, and relocated after every delivery.
+  const pos = randomSinkPosition(world);
+  const sink = world.spawnWindow(pos.x, pos.y, SINK_W, SINK_H, 'Backup_Drive (D:)', 135, WindowKind.SINK);
   g.sinkId = sink.id;
 
   // starter platforms the player can rearrange (all RAM-costing)
@@ -95,6 +133,7 @@ export function placePacketAtSpawn(world: World, g: GameState): void {
   a.state.groundEntity = null;
   a.state.localOffsetX = 0;
   a.state.dir = 1;
+  a.state.spawnDwell = 0;
 }
 
 /** Recompute Memory Usage from the open (non-closing, non-protected) windows. */
@@ -171,7 +210,14 @@ export function gameSystem(world: World, g: GameState, dt: number): void {
     g.freeze -= dt;
     if (g.freeze <= 0) {
       if (g.phase === GamePhase.DISSOLVING) { g.resets++; placePacketAtSpawn(world, g); }
-      if (g.phase === GamePhase.WON) { g.wins++; buildLevel(world, g); }
+      if (g.phase === GamePhase.WON) {
+        g.wins++;
+        // Relocate the goal to a fresh random edge and re-emit the packet.
+        // The player's platform layout and integrity carry over, so a
+        // delivery flows straight into the next run with a new target.
+        relocateSink(world, g);
+        placePacketAtSpawn(world, g);
+      }
       g.phase = GamePhase.PLAYING;
     }
     return; // packet is frozen during celebration
