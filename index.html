@@ -31,7 +31,8 @@
   </p>
   <canvas id="stage" width="820" height="620"></canvas>
 
-  <!-- zero-build: load compiled ES modules directly -->
-  <script type="module" src="./dist/main.js"></script>
+  <!-- Standalone bundle (classic script, no ES-module imports) so this file
+       works when opened directly via file:// as well as over http://. -->
+  <script src="./dist/bundle.js"></script>
 </body>
 </html>

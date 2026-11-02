@@ -38,28 +38,35 @@ overrides.
   decays it faster). Click its close box for an **explosive launch** — stronger
   the earlier you dismiss it.
 
-## Run it (zero build — already compiled)
+## Run it
 
-The repo ships with `dist/` prebuilt, so you can just serve the folder and open
-`index.html`. Because it loads ES modules, use a tiny static server (opening the
-file over `file://` is blocked by module CORS rules in most browsers):
+`index.html` loads a single self-contained bundle (`dist/bundle.js`, a classic
+script with no ES-module imports), so you can **just double-click `index.html`**
+and it plays — no server needed.
+
+If you prefer a server (or edit the modular `dist/*.js` files directly), any
+static server works too:
 
 ```sh
-# any static server works; pick one you have
 npx serve .
 # or
 python -m http.server 8080
 ```
 
-Then open the printed URL and the canvas auto-boots.
+> Note: a `<script type="module">` version would NOT work over `file://` —
+> browsers block module imports on the file protocol for security. That's why
+> `index.html` uses the bundled classic script instead.
 
 ## Rebuild from source
 
 ```sh
-npm install      # installs TypeScript only
-npm run build    # tsc -> dist/
+npm install      # installs TypeScript + esbuild
+npm run build    # tsc -> dist/*.js  AND  esbuild -> dist/bundle.js
 npm run typecheck
 ```
+
+`npm run build` does both: the modular `dist/` ES modules (for the served
+workflow) and the single `dist/bundle.js` that `index.html` loads.
 
 ## Layout
 
