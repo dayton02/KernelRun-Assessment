@@ -30,6 +30,13 @@ export interface AgentState {
   // Dwell timer while grounded on the SPAWN window. When it elapses the source
   // auto-ejects the packet toward the goal, so it never idles on the source.
   spawnDwell: number;
+  // Elastic slip (Part 8): seconds of "wobble/stumble" telegraph remaining
+  // before a fast horizontal drag actually detaches the packet. 0 = steady.
+  wobble: number;
+  // Randomized source-eject velocity, rolled once per charge so the arc (and
+  // thus the landing spot) varies between launches. 0 = not yet rolled.
+  ejectVx: number;
+  ejectVy: number;
 }
 
 // --- Window (a platform) ---
@@ -43,6 +50,13 @@ export interface Draggable {
   titleBarH: number;
   vx: number;           // smoothed (flick) velocity
   vy: number;
+  // Click-to-Spring (Part 8): cooldown + a brief visual pop offset on the top
+  // edge so a spring pop reads as a mechanical bumper, not teleportation.
+  springCooldown: number;
+  springPop: number;    // seconds of visual pop remaining (0 = rest)
+  // Leapfrog Auto-Recycle (Part 8): >0 means this window is decommissioning
+  // (packet launched from it and landed elsewhere); it pulses then dissolves.
+  recycleTimer: number;
 }
 
 // --- Window archetypes (DESIGN.md Part 5) ---------------------------------

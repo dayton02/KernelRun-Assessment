@@ -148,17 +148,95 @@
     // source forever: after a short dwell it is ejected in a diagonal arc toward
     // the goal side, so the player relays it onward (catch -> flick) instead of
     // trying to coax it off a fixed, undraggable window.
+    //
+    // The arc is RANDOMIZED within a band each charge so the landing spot isn't
+    // rote. Horizontal is always toward the goal side; vertical always upward —
+    // only the magnitudes vary, keeping the opening fresh but always "winnable".
     spawn: {
       dwell: 0.9,
       // seconds grounded on the source before ejection
-      ejectVx: 340,
-      // horizontal eject speed (toward the goal side)
-      ejectVy: -720
-      // upward component of the eject arc
+      ejectVxMin: 240,
+      // horizontal eject speed band (toward goal side)
+      ejectVxMax: 460,
+      ejectVyMin: -820,
+      // upward component band (more negative = higher)
+      ejectVyMax: -560
+    }
+  };
+  var FLOW = {
+    // 1. Click-to-Spring: a quick click/space pops the hovered idle window up,
+    //    launching a resting packet deterministically — no violent mouse drag.
+    spring: {
+      impulse: 780,
+      // upward packet launch speed on a spring pop (px/s)
+      windowKick: -260,
+      // brief visual up-nudge of the window top edge
+      cooldown: 0.25,
+      // seconds between spring pops on one window
+      clickMaxMs: 220,
+      // press->release under this = a "click" (vs a drag)
+      clickMaxMove: 6
+      // px of pointer travel allowed to still count as a click
+    },
+    // Catch Cone: a mild gravitational snap pulling a falling packet toward a
+    // title bar it is about to land on, rewarding good positioning over pixels.
+    catchCone: {
+      height: 30,
+      // px above a title bar where the cone acts
+      halfWidth: 40,
+      // px to each side of the bar the cone spans
+      pull: 1400
+      // horizontal accel toward the bar center (px/s^2)
+    },
+    // 2. Marquee Net: drag on empty wallpaper to draw a selection box; its top
+    //    edge is an elastic trampoline. Costs RAM while held.
+    marquee: {
+      ramCost: 15,
+      // % RAM consumed while a marquee is held
+      restitution: 0.9,
+      // elastic bounce factor off the top border
+      minBounceVy: -620,
+      // guarantee at least this much upward pop
+      minSize: 24
+      // px: ignore accidental tiny marquees
+    },
+    // 3. Leapfrog Auto-Recycle: the window a packet LAUNCHED from decommissions
+    //    on a timer once the packet lands elsewhere, refunding RAM + combo.
+    recycle: {
+      decommission: 2,
+      // seconds of pulse before it dissolves
+      comboWindow: 6,
+      // seconds to chain recycles for the combo meter
+      comboMax: 8
+      // cap on the recycle combo multiplier
+    },
+    // 4. Elastic Slip: fast horizontal drag first wobbles the packet for a grace
+    //    window; only continued over-speed drag past it actually slips it off.
+    slip: {
+      wobbleTime: 0.3
+      // seconds of telegraphed wobble before detaching
+    },
+    // 5. Arcade pacing: delivery streak multiplier + difficulty ramp + shake.
+    pacing: {
+      streakMax: 3,
+      // 1x .. 3x delivery multiplier
+      speedupPerWin: 0.05,
+      // +5% base patrol speed per delivery
+      speedupMax: 2.5,
+      // cap the ramp at 2.5x base
+      shakeOnWin: 10,
+      // screen-shake amplitude (px) on a delivery
+      shakeDecay: 6
+      // per-second shake decay
     }
   };
 
   // src/world.ts
+  function marqueeBounds(m) {
+    const x = Math.min(m.x0, m.x1);
+    const y = Math.min(m.y0, m.y1);
+    return { x, y, w: Math.abs(m.x1 - m.x0), h: Math.abs(m.y1 - m.y0) };
+  }
   function makeArchetype(kind, baseY) {
     return {
       kind,
@@ -195,6 +273,11 @@
       this.windows = [];
       this.pointer = { x: 0, y: 0, down: false, pressed: false, released: false };
       this.firewallW = 8;
+      // Emergency Marquee Net (Part 8): a selection box the player drags on empty
+      // wallpaper. Its top edge is an elastic trampoline; costs RAM while held.
+      this.marquee = { active: false, x0: 0, y0: 0, x1: 0, y1: 0, cool: 0 };
+      // Keyboard: spacebar edge for click-to-spring on the hovered window.
+      this.springKey = false;
       this.nextId = 1;
       this.width = width;
       this.height = height;
@@ -212,7 +295,10 @@
           coyote: 0,
           groundEntity: null,
           localOffsetX: 0,
-          spawnDwell: 0
+          spawnDwell: 0,
+          wobble: 0,
+          ejectVx: 0,
+          ejectVy: 0
         }
       };
     }
@@ -225,7 +311,17 @@
         rect: { x, y, w, h, z: this.windows.length },
         prev: { x, y, w, h },
         style: { title, closing: 0, hue },
-        drag: { grabbed: false, grabDX: 0, grabDY: 0, titleBarH: 26, vx: 0, vy: 0 },
+        drag: {
+          grabbed: false,
+          grabDX: 0,
+          grabDY: 0,
+          titleBarH: 26,
+          vx: 0,
+          vy: 0,
+          springCooldown: 0,
+          springPop: 0,
+          recycleTimer: 0
+        },
         arch: makeArchetype(kind, y)
       };
       this.windows.push(win);
@@ -516,12 +612,6 @@
     note(300, 0.16, "sawtooth", 0.5, 120);
     note(150, 0.2, "square", 0.3);
   }
-  function cueWin() {
-    if (!ctx) return;
-    [523, 659, 784, 1047].forEach((f, i) => {
-      window.setTimeout(() => note(f, 0.22, "sine", 0.5), i * 90);
-    });
-  }
   function cueDissolve() {
     note(110, 0.4, "sawtooth", 0.5, 40);
   }
@@ -532,8 +622,29 @@
     note(900, 0.25, "square", 0.4, 90);
     note(300, 0.3, "sawtooth", 0.3, 60);
   }
+  function cueSpring() {
+    note(300, 0.12, "square", 0.45, 680);
+  }
+  function cueNet() {
+    note(240, 0.14, "sine", 0.5, 520);
+    note(480, 0.1, "triangle", 0.25);
+  }
+  function cueRecycle() {
+    note(620, 0.1, "square", 0.3, 180);
+  }
+  function cueDeliverChord(semitoneBoost = 0) {
+    const base = 523 * Math.pow(2, semitoneBoost / 12);
+    [0, 4, 7, 12].forEach((st, i) => {
+      if (typeof window === "undefined") return;
+      window.setTimeout(() => note(base * Math.pow(2, st / 12), 0.26, "sine", 0.5), i * 70);
+    });
+  }
 
   // src/systems.ts
+  var launchTracker = {
+    lastLaunchWin: null,
+    landedElsewhere: false
+  };
   function inputSystem(world) {
     const p = world.pointer;
     if (p.pressed) {
@@ -588,8 +699,11 @@
       w.prev.y = py;
       w.prev.w = w.rect.w;
       w.prev.h = w.rect.h;
+      if (w.drag.springCooldown > 0) w.drag.springCooldown -= dt;
+      if (w.drag.springPop > 0) w.drag.springPop -= dt;
       if (w.style.closing > 0) w.style.closing += dt;
     }
+    if (world.marquee.cool > 0) world.marquee.cool -= dt;
     world.windows = world.windows.filter((w) => w.style.closing < 0.35);
   }
   function agentIntentSystem(world, dt) {
@@ -604,6 +718,10 @@
     a.kin.acc.y = CONFIG.gravity * localGravityMultiplier(world);
     if (a.state.fsm === "JUMPING" /* JUMPING */ && a.kin.vel.y >= 0) a.state.fsm = "FALLING" /* FALLING */;
     if (a.state.fsm === "LAUNCHED" /* LAUNCHED */ && a.kin.vel.y >= 0) a.state.fsm = "FALLING" /* FALLING */;
+    if (!a.state.grounded && a.kin.vel.y > 0) {
+      const cone = nearestCatchCone(world);
+      if (cone) a.kin.acc.x += cone;
+    }
     a.kin.vel.x += a.kin.acc.x * dt;
     a.kin.vel.y += a.kin.acc.y * dt;
     if (a.state.fsm === "WALL_SLIDING" /* WALL_SLIDING */) {
@@ -623,6 +741,11 @@
     s.grounded = false;
     let newWall = 0;
     let landedOn = null;
+    if (marqueeNet(world)) {
+      s.wall = 0;
+      if (wasGrounded) s.coyote = CONFIG.coyoteTime;
+      return;
+    }
     const sorted = [...world.windows].sort((w1, w2) => w2.rect.z - w1.rect.z);
     for (const w of sorted) {
       if (w.style.closing > 0) continue;
@@ -697,24 +820,36 @@
       const gw = world.windows.find((w) => w.id === s.groundEntity);
       if (gw) {
         const upwardFlick = gw.drag.vy < -CONFIG.flickThreshold;
-        if (!upwardFlick && Math.abs(gw.drag.vx) > CONFIG.slipThreshold) {
-          s.grounded = false;
-          s.groundEntity = null;
-          a.kin.vel.x = 0;
-          a.kin.vel.y = Math.max(a.kin.vel.y, 0);
-          a.state.fsm = "FALLING" /* FALLING */;
-          cueSlip();
-          s.wall = newWall;
-          return;
+        const overSpeed = !upwardFlick && Math.abs(gw.drag.vx) > CONFIG.slipThreshold;
+        if (overSpeed) {
+          if (s.wobble <= 0) s.wobble = FLOW.slip.wobbleTime;
+          s.wobble -= dt;
+          if (s.wobble <= 0) {
+            s.grounded = false;
+            s.groundEntity = null;
+            a.kin.vel.x = 0;
+            a.kin.vel.y = Math.max(a.kin.vel.y, 0);
+            a.state.fsm = "FALLING" /* FALLING */;
+            cueSlip();
+            s.wall = newWall;
+            return;
+          }
+        } else {
+          s.wobble = 0;
         }
         if (gw.arch.kind === "SPAWN" /* SPAWN */) {
+          if (s.spawnDwell === 0) {
+            const sp = GAME.spawn;
+            s.ejectVx = sp.ejectVxMin + Math.random() * (sp.ejectVxMax - sp.ejectVxMin);
+            s.ejectVy = sp.ejectVyMin + Math.random() * (sp.ejectVyMax - sp.ejectVyMin);
+          }
           s.spawnDwell += dt;
           if (s.spawnDwell >= GAME.spawn.dwell) {
             s.spawnDwell = 0;
             detach(world, gw);
             const toCenter = gw.rect.x + gw.rect.w / 2 < world.width / 2 ? 1 : -1;
-            a.kin.vel.x = toCenter * GAME.spawn.ejectVx;
-            a.kin.vel.y = GAME.spawn.ejectVy;
+            a.kin.vel.x = toCenter * s.ejectVx;
+            a.kin.vel.y = s.ejectVy;
             a.state.fsm = "LAUNCHED" /* LAUNCHED */;
             cueLaunch();
             s.wall = newWall;
@@ -773,7 +908,11 @@
         world.agent.shape.radius,
         w.rect.w - world.agent.shape.radius
       );
+      s.wobble = 0;
       cueLand();
+      if (launchTracker.lastLaunchWin != null && launchTracker.lastLaunchWin !== w.id) {
+        launchTracker.landedElsewhere = true;
+      }
     }
   }
   function detach(world, w) {
@@ -785,15 +924,87 @@
       CONFIG.detachMaxVx
     );
     a.kin.vel.x = inherited + s.dir * CONFIG.patrolSpeed;
+    if (!w.arch.protectedWin) {
+      launchTracker.lastLaunchWin = w.id;
+      launchTracker.landedElsewhere = false;
+    }
     s.grounded = false;
     s.groundEntity = null;
     s.spawnDwell = 0;
+    s.wobble = 0;
   }
   function edgeLeap(world, w) {
     const a = world.agent;
     detach(world, w);
     a.kin.vel.y = -CONFIG.edgeJumpImpulse;
     a.state.fsm = "JUMPING" /* JUMPING */;
+  }
+  function nearestCatchCone(world) {
+    const a = world.agent;
+    const c = FLOW.catchCone;
+    let best = null;
+    let bestDy = Infinity;
+    for (const w of world.windows) {
+      if (w.style.closing > 0 || w.drag.grabbed) continue;
+      const feet = a.tf.pos.y + a.shape.radius;
+      const dy = w.rect.y - feet;
+      if (dy < 0 || dy > c.height) continue;
+      const left = w.rect.x - c.halfWidth;
+      const right = w.rect.x + w.rect.w + c.halfWidth;
+      if (a.tf.pos.x < left || a.tf.pos.x > right) continue;
+      if (dy < bestDy) {
+        bestDy = dy;
+        const center = w.rect.x + w.rect.w / 2;
+        const dir = Math.sign(center - a.tf.pos.x);
+        const strength = 1 - dy / c.height;
+        best = dir * c.pull * strength;
+      }
+    }
+    return best ?? 0;
+  }
+  function springPopWindow(world, w) {
+    if (w.arch.protectedWin || w.style.closing > 0) return false;
+    if (w.drag.springCooldown > 0) return false;
+    w.drag.springCooldown = FLOW.spring.cooldown;
+    w.drag.springPop = 0.18;
+    const a = world.agent;
+    const s = a.state;
+    if (s.grounded && s.groundEntity === w.id) {
+      detach(world, w);
+      a.kin.vel.y = -FLOW.spring.impulse;
+      a.kin.vel.x = s.dir * CONFIG.patrolSpeed;
+      s.fsm = "LAUNCHED" /* LAUNCHED */;
+      cueSpring();
+      return true;
+    }
+    cueSpring();
+    return false;
+  }
+  function marqueeNet(world) {
+    const m = world.marquee;
+    if (!m.active) return false;
+    if (m.cool > 0) return false;
+    const a = world.agent;
+    const s = a.state;
+    if (s.grounded || a.kin.vel.y <= 0) return false;
+    const b = marqueeBounds(m);
+    if (b.w < FLOW.marquee.minSize || b.h < FLOW.marquee.minSize) return false;
+    const r = a.shape.radius;
+    const topPrev = b.y;
+    const feetPrev = a.tf.prev.y + r;
+    const feetNow = a.tf.pos.y + r;
+    const crossed = feetPrev <= topPrev && feetNow >= topPrev;
+    const overlapX = a.tf.pos.x + r > b.x && a.tf.pos.x - r < b.x + b.w;
+    if (crossed && overlapX) {
+      a.tf.pos.y = topPrev - r;
+      const bounce = Math.min(-a.kin.vel.y * FLOW.marquee.restitution, FLOW.marquee.minBounceVy);
+      a.kin.vel.y = bounce;
+      s.fsm = "LAUNCHED" /* LAUNCHED */;
+      m.cool = 0.25;
+      cueNet();
+      return true;
+    }
+    return false;
   }
   function tryLaunch(world, w) {
     const a = world.agent;
@@ -845,7 +1056,12 @@
       messageTtl: 0,
       wins: 0,
       resets: 0,
-      gcSweeps: 0
+      gcSweeps: 0,
+      streak: 1,
+      combo: 0,
+      comboTtl: 0,
+      speedMul: 1,
+      shake: 0
     };
   }
   var SINK_W = 200;
@@ -924,7 +1140,8 @@
     return ram;
   }
   function totalRam(world, g) {
-    return Math.min(GAME.ramMax, baseRam(world) + g.leakedRam);
+    const marqueeCost = world.marquee.active ? FLOW.marquee.ramCost : 0;
+    return Math.min(GAME.ramMax, baseRam(world) + g.leakedRam + marqueeCost);
   }
   function canSpawn(world, g) {
     const used = g ? totalRam(world, g) : baseRam(world);
@@ -947,8 +1164,38 @@
     g.message = msg;
     g.messageTtl = ttl;
   }
+  var BASE_PATROL = CONFIG.patrolSpeed;
+  function processRecycle(world, g, dt) {
+    if (launchTracker.landedElsewhere && launchTracker.lastLaunchWin != null) {
+      const src = world.windows.find((w) => w.id === launchTracker.lastLaunchWin);
+      if (src && !src.arch.protectedWin && src.drag.recycleTimer === 0 && src.style.closing === 0) {
+        src.drag.recycleTimer = FLOW.recycle.decommission;
+      }
+      launchTracker.landedElsewhere = false;
+      launchTracker.lastLaunchWin = null;
+    }
+    if (g.comboTtl > 0) {
+      g.comboTtl -= dt;
+      if (g.comboTtl <= 0) g.combo = 0;
+    }
+    for (const w of world.windows) {
+      if (w.drag.recycleTimer > 0) {
+        w.drag.recycleTimer -= dt;
+        if (w.drag.recycleTimer <= 0 && w.style.closing === 0) {
+          w.style.closing = 1e-4;
+          g.leakedRam = Math.max(0, g.leakedRam - GAME.ramPerWindow);
+          g.combo = Math.min(FLOW.recycle.comboMax, g.combo + 1);
+          g.comboTtl = FLOW.recycle.comboWindow;
+          cueRecycle();
+        }
+      }
+    }
+  }
   function gameSystem(world, g, dt) {
     if (g.messageTtl > 0) g.messageTtl -= dt;
+    CONFIG.patrolSpeed = BASE_PATROL * g.speedMul;
+    if (g.shake > 0) g.shake = Math.max(0, g.shake - FLOW.pacing.shakeDecay * dt);
+    processRecycle(world, g, dt);
     const openCount = auxWindowCount(world);
     g.leakedRam += GAME.ramLeakPerWindow * openCount * dt;
     g.ram = totalRam(world, g);
@@ -977,13 +1224,17 @@
     if (sink && overlapsDropZone(a.tf.pos.x, a.tf.pos.y, a.shape.radius, sink)) {
       g.phase = "WON" /* WON */;
       g.freeze = GAME.winFreeze;
-      banner(g, "PACKET DELIVERED \u2713", GAME.winFreeze);
-      cueWin();
+      g.streak = Math.min(FLOW.pacing.streakMax, g.streak + 1);
+      g.speedMul = Math.min(FLOW.pacing.speedupMax, g.speedMul * (1 + FLOW.pacing.speedupPerWin));
+      g.shake = FLOW.pacing.shakeOnWin;
+      banner(g, `PACKET DELIVERED \u2713  ${g.streak}x`, GAME.winFreeze);
+      cueDeliverChord((g.streak - 1) * 2);
       return;
     }
     const killY = world.height - GAME.taskbarH;
     if (a.tf.pos.y - a.shape.radius > killY) {
       g.integrity -= GAME.integrityPenalty;
+      g.streak = 1;
       if (g.integrity <= 0) {
         g.integrity = 0;
         g.phase = "DISSOLVING" /* DISSOLVING */;
@@ -1045,23 +1296,40 @@
   };
   function render(ctx2, world, game) {
     ctx2.clearRect(0, 0, world.width, world.height);
+    ctx2.save();
+    if (game && game.shake > 0) {
+      const s = game.shake;
+      ctx2.translate((Math.random() * 2 - 1) * s, (Math.random() * 2 - 1) * s);
+    }
     ctx2.fillStyle = "#0b1020";
-    ctx2.fillRect(0, 0, world.width, world.height);
+    ctx2.fillRect(-20, -20, world.width + 40, world.height + 40);
     drawGrid(ctx2, world);
     drawFirewall(ctx2, world);
     const sorted = [...world.windows].sort((a2, b) => a2.rect.z - b.rect.z);
     for (const w of sorted) {
       const fade = w.style.closing > 0 ? Math.max(0, 1 - w.style.closing / 0.35) : 1;
-      ctx2.globalAlpha = fade;
+      const decommission = w.drag.recycleTimer > 0;
+      const blink = decommission ? 0.55 + 0.45 * Math.sin(w.drag.recycleTimer * 18) : 1;
+      ctx2.globalAlpha = fade * (decommission ? blink : 1);
       const r = w.rect;
-      ctx2.fillStyle = `hsl(${w.style.hue} 30% 16%)`;
+      ctx2.fillStyle = decommission ? "hsl(135 45% 22%)" : `hsl(${w.style.hue} 30% 16%)`;
       ctx2.fillRect(r.x, r.y, r.w, r.h);
-      ctx2.strokeStyle = `hsl(${w.style.hue} 60% 55%)`;
+      ctx2.strokeStyle = decommission ? "#6cff9a" : `hsl(${w.style.hue} 60% 55%)`;
       ctx2.lineWidth = 2;
       ctx2.strokeRect(r.x, r.y, r.w, r.h);
+      if (w.style.closing > 0) {
+        ctx2.fillStyle = "rgba(120,255,170,0.5)";
+        const prog = w.style.closing / 0.35;
+        for (let yy = 0; yy < r.h; yy += 4) {
+          for (let xx = 0; xx < r.w; xx += 4) {
+            if ((xx + yy) / 4 % 3 === 0 && Math.random() < prog) ctx2.fillRect(r.x + xx, r.y + yy, 3, 3);
+          }
+        }
+      }
       drawArchetype(ctx2, w);
       let barL = 42;
       if (w.arch.kind === "MEDIA" /* MEDIA */) barL = 42 + 28 * w.arch.beatPulse;
+      if (decommission) barL = 50;
       if (w.arch.kind === "BSOD" /* BSOD */) {
         const frac = Math.max(0, w.arch.crumble / w.arch.crumbleMax);
         const flick = frac < 0.4 ? Math.sin(w.arch.crumbleMax * 40 - frac * 60) > 0 ? 55 : 25 : 42;
@@ -1091,23 +1359,54 @@
       }
       ctx2.globalAlpha = 1;
     }
+    drawMarquee(ctx2, world);
     const a = world.agent;
     const dissolving = game?.phase === "DISSOLVING" /* DISSOLVING */;
+    const wobbling = a.state.wobble > 0;
     ctx2.globalAlpha = dissolving ? Math.max(0, game.freeze / 0.9) : 1;
+    ctx2.save();
+    ctx2.translate(a.tf.pos.x, a.tf.pos.y);
+    if (wobbling) {
+      ctx2.rotate(Math.sin(Date.now() / 30) * 0.5);
+    }
     ctx2.beginPath();
-    ctx2.arc(a.tf.pos.x, a.tf.pos.y, a.shape.radius, 0, Math.PI * 2);
-    ctx2.fillStyle = stateColor(a.state.fsm);
+    ctx2.arc(0, 0, a.shape.radius, 0, Math.PI * 2);
+    ctx2.fillStyle = wobbling ? "#ffd166" : stateColor(a.state.fsm);
     ctx2.fill();
     ctx2.lineWidth = 2;
     ctx2.strokeStyle = "#ffffff";
     ctx2.stroke();
     ctx2.fillStyle = "#0b1020";
     ctx2.font = "9px ui-monospace, monospace";
-    ctx2.fillText("0", a.tf.pos.x - 2.5, a.tf.pos.y + 3);
+    ctx2.fillText("0", -2.5, 3);
+    ctx2.restore();
+    if (wobbling) {
+      ctx2.fillStyle = "#ffd166";
+      ctx2.font = "14px system-ui, sans-serif";
+      ctx2.fillText("\u26A0", a.tf.pos.x - 6, a.tf.pos.y - a.shape.radius - 6);
+    }
     ctx2.globalAlpha = 1;
     drawTaskbar(ctx2, world, game);
+    ctx2.restore();
     if (game) drawGameHud(ctx2, world, game);
     else drawHud(ctx2, world);
+  }
+  function drawMarquee(ctx2, world) {
+    const m = world.marquee;
+    if (!m.active) return;
+    const x = Math.min(m.x0, m.x1), y = Math.min(m.y0, m.y1);
+    const w = Math.abs(m.x1 - m.x0), h = Math.abs(m.y1 - m.y0);
+    ctx2.fillStyle = "rgba(90,150,255,0.15)";
+    ctx2.fillRect(x, y, w, h);
+    ctx2.strokeStyle = "rgba(130,180,255,0.9)";
+    ctx2.lineWidth = 1;
+    ctx2.strokeRect(x + 0.5, y + 0.5, w, h);
+    ctx2.strokeStyle = "#8fd0ff";
+    ctx2.lineWidth = 3;
+    ctx2.beginPath();
+    ctx2.moveTo(x, y);
+    ctx2.lineTo(x + w, y);
+    ctx2.stroke();
   }
   function drawTaskbar(ctx2, world, game) {
     const h = GAME.taskbarH;
@@ -1311,7 +1610,18 @@
     }
     ctx2.fillStyle = "#7f8db0";
     ctx2.font = "11px ui-monospace, monospace";
-    ctx2.fillText(`delivered: ${g.wins}  resets: ${g.resets}  GC: ${g.gcSweeps}`, world.width - 210, 20);
+    ctx2.fillText(`delivered: ${g.wins}  resets: ${g.resets}  GC: ${g.gcSweeps}`, world.width - 230, 20);
+    ctx2.fillStyle = g.streak > 1 ? "#ffd166" : "#7f8db0";
+    ctx2.font = "600 15px system-ui, sans-serif";
+    ctx2.fillText(`STREAK ${g.streak}x`, world.width - 230, 40);
+    if (g.combo > 0) {
+      ctx2.fillStyle = "#6cff9a";
+      ctx2.font = "12px ui-monospace, monospace";
+      ctx2.fillText(`recycle combo ${g.combo}x`, world.width - 230, 58);
+    }
+    ctx2.fillStyle = "#7f8db0";
+    ctx2.font = "10px ui-monospace, monospace";
+    ctx2.fillText(`speed ${(g.speedMul * 100).toFixed(0)}%`, world.width - 230, 74);
     if (g.messageTtl > 0 && g.message) {
       ctx2.globalAlpha = Math.min(1, g.messageTtl * 2);
       ctx2.fillStyle = g.phase === "WON" /* WON */ ? "#6cff9a" : "#ffd166";
@@ -1348,18 +1658,54 @@
       world.pointer.x = (e.clientX - rect.left) * (canvas.width / rect.width);
       world.pointer.y = (e.clientY - rect.top) * (canvas.height / rect.height);
     };
+    let pressT = 0, pressX = 0, pressY = 0, pressWin = false, marqueeStarted = false;
     canvas.addEventListener("pointerdown", (e) => {
       initAudio();
       setPos(e);
       world.pointer.down = true;
       world.pointer.pressed = true;
       canvas.setPointerCapture(e.pointerId);
+      pressT = performance.now();
+      pressX = world.pointer.x;
+      pressY = world.pointer.y;
+      const hit = world.topWindowAt(world.pointer.x, world.pointer.y);
+      pressWin = !!hit;
+      marqueeStarted = false;
+      if (!hit) {
+        world.marquee.active = true;
+        world.marquee.x0 = world.pointer.x;
+        world.marquee.y0 = world.pointer.y;
+        world.marquee.x1 = world.pointer.x;
+        world.marquee.y1 = world.pointer.y;
+        marqueeStarted = true;
+      }
     });
-    canvas.addEventListener("pointermove", setPos);
+    canvas.addEventListener("pointermove", (e) => {
+      setPos(e);
+      if (marqueeStarted && world.marquee.active) {
+        world.marquee.x1 = world.pointer.x;
+        world.marquee.y1 = world.pointer.y;
+      }
+    });
     canvas.addEventListener("pointerup", (e) => {
       setPos(e);
       world.pointer.down = false;
       world.pointer.released = true;
+      const dt = performance.now() - pressT;
+      const moved = Math.hypot(world.pointer.x - pressX, world.pointer.y - pressY);
+      if (pressWin && dt <= FLOW.spring.clickMaxMs && moved <= FLOW.spring.clickMaxMove) {
+        const hit = world.topWindowAt(pressX, pressY);
+        if (hit) springPopWindow(world, hit);
+      }
+      world.marquee.active = false;
+      marqueeStarted = false;
+    });
+    window.addEventListener("keydown", (e) => {
+      if (e.code === "Space") {
+        e.preventDefault();
+        const hit = world.topWindowAt(world.pointer.x, world.pointer.y);
+        if (hit) springPopWindow(world, hit);
+      }
     });
     canvas.addEventListener("dblclick", (e) => {
       setPos(e);

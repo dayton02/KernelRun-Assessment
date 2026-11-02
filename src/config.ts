@@ -119,9 +119,70 @@ export const GAME = {
   // source forever: after a short dwell it is ejected in a diagonal arc toward
   // the goal side, so the player relays it onward (catch -> flick) instead of
   // trying to coax it off a fixed, undraggable window.
+  //
+  // The arc is RANDOMIZED within a band each charge so the landing spot isn't
+  // rote. Horizontal is always toward the goal side; vertical always upward —
+  // only the magnitudes vary, keeping the opening fresh but always "winnable".
   spawn: {
     dwell: 0.9,              // seconds grounded on the source before ejection
-    ejectVx: 340,            // horizontal eject speed (toward the goal side)
-    ejectVy: -720,           // upward component of the eject arc
+    ejectVxMin: 240,         // horizontal eject speed band (toward goal side)
+    ejectVxMax: 460,
+    ejectVyMin: -820,        // upward component band (more negative = higher)
+    ejectVyMax: -560,
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Gameplay-flow overhaul (Part 8). Ergonomics, recovery, recycling, pacing.
+// ---------------------------------------------------------------------------
+export const FLOW = {
+  // 1. Click-to-Spring: a quick click/space pops the hovered idle window up,
+  //    launching a resting packet deterministically — no violent mouse drag.
+  spring: {
+    impulse: 780,            // upward packet launch speed on a spring pop (px/s)
+    windowKick: -260,        // brief visual up-nudge of the window top edge
+    cooldown: 0.25,          // seconds between spring pops on one window
+    clickMaxMs: 220,         // press->release under this = a "click" (vs a drag)
+    clickMaxMove: 6,         // px of pointer travel allowed to still count as a click
+  },
+
+  // Catch Cone: a mild gravitational snap pulling a falling packet toward a
+  // title bar it is about to land on, rewarding good positioning over pixels.
+  catchCone: {
+    height: 30,              // px above a title bar where the cone acts
+    halfWidth: 40,           // px to each side of the bar the cone spans
+    pull: 1400,              // horizontal accel toward the bar center (px/s^2)
+  },
+
+  // 2. Marquee Net: drag on empty wallpaper to draw a selection box; its top
+  //    edge is an elastic trampoline. Costs RAM while held.
+  marquee: {
+    ramCost: 15,             // % RAM consumed while a marquee is held
+    restitution: 0.9,        // elastic bounce factor off the top border
+    minBounceVy: -620,       // guarantee at least this much upward pop
+    minSize: 24,             // px: ignore accidental tiny marquees
+  },
+
+  // 3. Leapfrog Auto-Recycle: the window a packet LAUNCHED from decommissions
+  //    on a timer once the packet lands elsewhere, refunding RAM + combo.
+  recycle: {
+    decommission: 2.0,       // seconds of pulse before it dissolves
+    comboWindow: 6.0,        // seconds to chain recycles for the combo meter
+    comboMax: 8,             // cap on the recycle combo multiplier
+  },
+
+  // 4. Elastic Slip: fast horizontal drag first wobbles the packet for a grace
+  //    window; only continued over-speed drag past it actually slips it off.
+  slip: {
+    wobbleTime: 0.30,        // seconds of telegraphed wobble before detaching
+  },
+
+  // 5. Arcade pacing: delivery streak multiplier + difficulty ramp + shake.
+  pacing: {
+    streakMax: 3,            // 1x .. 3x delivery multiplier
+    speedupPerWin: 0.05,     // +5% base patrol speed per delivery
+    speedupMax: 2.5,         // cap the ramp at 2.5x base
+    shakeOnWin: 10,          // screen-shake amplitude (px) on a delivery
+    shakeDecay: 6,           // per-second shake decay
   },
 };

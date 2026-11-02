@@ -19,24 +19,45 @@ const KIND_TAG: Record<WindowKind, string> = {
 export function render(ctx: CanvasRenderingContext2D, world: World, game?: GameState): void {
   ctx.clearRect(0, 0, world.width, world.height);
 
+  // --- screen shake (Part 8): offset the whole scene on a delivery ---
+  ctx.save();
+  if (game && game.shake > 0) {
+    const s = game.shake;
+    ctx.translate((Math.random() * 2 - 1) * s, (Math.random() * 2 - 1) * s);
+  }
+
   // desktop backdrop
   ctx.fillStyle = '#0b1020';
-  ctx.fillRect(0, 0, world.width, world.height);
+  ctx.fillRect(-20, -20, world.width + 40, world.height + 40);
   drawGrid(ctx, world);
   drawFirewall(ctx, world);
 
   const sorted = [...world.windows].sort((a, b) => a.rect.z - b.rect.z);
   for (const w of sorted) {
     const fade = w.style.closing > 0 ? Math.max(0, 1 - w.style.closing / 0.35) : 1;
-    ctx.globalAlpha = fade;
+    // Leapfrog decommission pulse: blink while counting down to dissolve.
+    const decommission = w.drag.recycleTimer > 0;
+    const blink = decommission ? 0.55 + 0.45 * Math.sin(w.drag.recycleTimer * 18) : 1;
+    ctx.globalAlpha = fade * (decommission ? blink : 1);
     const r = w.rect;
 
     // body
-    ctx.fillStyle = `hsl(${w.style.hue} 30% 16%)`;
+    ctx.fillStyle = decommission ? 'hsl(135 45% 22%)' : `hsl(${w.style.hue} 30% 16%)`;
     ctx.fillRect(r.x, r.y, r.w, r.h);
-    ctx.strokeStyle = `hsl(${w.style.hue} 60% 55%)`;
+    ctx.strokeStyle = decommission ? '#6cff9a' : `hsl(${w.style.hue} 60% 55%)`;
     ctx.lineWidth = 2;
     ctx.strokeRect(r.x, r.y, r.w, r.h);
+
+    // retro bitmap "dissolve" dither while fading out
+    if (w.style.closing > 0) {
+      ctx.fillStyle = 'rgba(120,255,170,0.5)';
+      const prog = w.style.closing / 0.35;
+      for (let yy = 0; yy < r.h; yy += 4) {
+        for (let xx = 0; xx < r.w; xx += 4) {
+          if (((xx + yy) / 4 % 3 === 0) && Math.random() < prog) ctx.fillRect(r.x + xx, r.y + yy, 3, 3);
+        }
+      }
+    }
 
     // archetype-specific body decoration (drawn under the title bar)
     drawArchetype(ctx, w);
@@ -44,6 +65,7 @@ export function render(ctx: CanvasRenderingContext2D, world: World, game?: GameS
     // title bar (one-way platform) — brighten on a media beat
     let barL = 42;
     if (w.arch.kind === WindowKind.MEDIA) barL = 42 + 28 * w.arch.beatPulse;
+    if (decommission) barL = 50;
     if (w.arch.kind === WindowKind.BSOD) {
       // flicker as it nears collapse
       const frac = Math.max(0, w.arch.crumble / w.arch.crumbleMax);
@@ -80,28 +102,63 @@ export function render(ctx: CanvasRenderingContext2D, world: World, game?: GameS
     ctx.globalAlpha = 1;
   }
 
+  // marquee safety net (drawn over windows, under the packet/HUD)
+  drawMarquee(ctx, world);
+
   // agent (the data packet)
   const a = world.agent;
   const dissolving = game?.phase === GamePhase.DISSOLVING;
+  const wobbling = a.state.wobble > 0;
   ctx.globalAlpha = dissolving ? Math.max(0, game!.freeze / 0.9) : 1;
+  ctx.save();
+  ctx.translate(a.tf.pos.x, a.tf.pos.y);
+  if (wobbling) {
+    // oscillating "stumble" rotation telegraphing the imminent slip
+    ctx.rotate(Math.sin(Date.now() / 30) * 0.5);
+  }
   ctx.beginPath();
-  ctx.arc(a.tf.pos.x, a.tf.pos.y, a.shape.radius, 0, Math.PI * 2);
-  ctx.fillStyle = stateColor(a.state.fsm);
+  ctx.arc(0, 0, a.shape.radius, 0, Math.PI * 2);
+  ctx.fillStyle = wobbling ? '#ffd166' : stateColor(a.state.fsm);
   ctx.fill();
   ctx.lineWidth = 2;
   ctx.strokeStyle = '#ffffff';
   ctx.stroke();
-  // little packet "glyph" so it reads as data
   ctx.fillStyle = '#0b1020';
   ctx.font = '9px ui-monospace, monospace';
-  ctx.fillText('0', a.tf.pos.x - 2.5, a.tf.pos.y + 3);
+  ctx.fillText('0', -2.5, 3);
+  ctx.restore();
+  // yellow alert icon above a wobbling packet
+  if (wobbling) {
+    ctx.fillStyle = '#ffd166';
+    ctx.font = '14px system-ui, sans-serif';
+    ctx.fillText('⚠', a.tf.pos.x - 6, a.tf.pos.y - a.shape.radius - 6);
+  }
   ctx.globalAlpha = 1;
 
   // taskbar + kill line
   drawTaskbar(ctx, world, game);
 
+  ctx.restore(); // end screen-shake transform
+
   if (game) drawGameHud(ctx, world, game);
   else drawHud(ctx, world);
+}
+
+function drawMarquee(ctx: CanvasRenderingContext2D, world: World): void {
+  const m = world.marquee;
+  if (!m.active) return;
+  const x = Math.min(m.x0, m.x1), y = Math.min(m.y0, m.y1);
+  const w = Math.abs(m.x1 - m.x0), h = Math.abs(m.y1 - m.y0);
+  // standard translucent blue OS selection box
+  ctx.fillStyle = 'rgba(90,150,255,0.15)';
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = 'rgba(130,180,255,0.9)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, w, h);
+  // highlight the TOP edge — the elastic trampoline surface
+  ctx.strokeStyle = '#8fd0ff';
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + w, y); ctx.stroke();
 }
 
 function drawTaskbar(ctx: CanvasRenderingContext2D, world: World, game?: GameState): void {
@@ -315,7 +372,20 @@ function drawGameHud(ctx: CanvasRenderingContext2D, world: World, g: GameState):
   // scoreboard
   ctx.fillStyle = '#7f8db0';
   ctx.font = '11px ui-monospace, monospace';
-  ctx.fillText(`delivered: ${g.wins}  resets: ${g.resets}  GC: ${g.gcSweeps}`, world.width - 210, 20);
+  ctx.fillText(`delivered: ${g.wins}  resets: ${g.resets}  GC: ${g.gcSweeps}`, world.width - 230, 20);
+
+  // streak + combo + difficulty (arcade pacing, Part 8)
+  ctx.fillStyle = g.streak > 1 ? '#ffd166' : '#7f8db0';
+  ctx.font = '600 15px system-ui, sans-serif';
+  ctx.fillText(`STREAK ${g.streak}x`, world.width - 230, 40);
+  if (g.combo > 0) {
+    ctx.fillStyle = '#6cff9a';
+    ctx.font = '12px ui-monospace, monospace';
+    ctx.fillText(`recycle combo ${g.combo}x`, world.width - 230, 58);
+  }
+  ctx.fillStyle = '#7f8db0';
+  ctx.font = '10px ui-monospace, monospace';
+  ctx.fillText(`speed ${(g.speedMul * 100).toFixed(0)}%`, world.width - 230, 74);
 
   // transient banner
   if (g.messageTtl > 0 && g.message) {

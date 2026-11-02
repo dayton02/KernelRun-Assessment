@@ -758,10 +758,20 @@ merely patrolled it would bounce back and forth forever with no way off. So the
 SPAWN window is handled specially in the pin block: it does **not** patrol or
 edge-leap. Instead it holds the packet centered for `spawn.dwell` seconds (a
 "downloading" charge, shown as a bar), then auto-ejects it in a diagonal arc
-(`spawn.ejectVx/ejectVy`) toward the goal side. The dwell timer (`spawnDwell` on
-the agent) resets on detach, so a packet that lands back on the source simply
-charges and re-ejects — no soft-lock. This turns the fixed source from a
-dead-end into the opening beat of each run.
+toward the goal side. The dwell timer (`spawnDwell` on the agent) resets on
+detach, so a packet that lands back on the source simply charges and re-ejects
+— no soft-lock. This turns the fixed source from a dead-end into the opening
+beat of each run.
+
+**Randomized eject arc.** A fixed eject made the opening rote — the packet
+always landed in the same place. So the arc is rolled randomly within a band
+(`spawn.ejectVx{Min,Max}` / `ejectVy{Min,Max}`) at the start of each charge and
+stored on the agent (`ejectVx/ejectVy`) so it's stable across the dwell.
+Horizontal is always toward the goal side and vertical always upward — only the
+magnitudes vary — so every launch is fresh and the landing spot unpredictable,
+while the opening stays always winnable. Verified: ~17 distinct horizontal
+speeds across 20 charges and 7 distinct landing reaches across 8 runs, all
+within the band and the physics bounded.
 
 ### 7.5 Verification
 
@@ -773,3 +783,91 @@ closing a window recovers base RAM immediately, and a forced 100% triggers one
 GC sweep that closes all auxiliary windows, drops the packet, and spares
 spawn/sink. A 9000-frame full-loop run stays finite and bounded (max speed
 ~636 px/s), confirming none of this regressed the local-coordinate physics.
+
+---
+
+## Part 8 — Gameplay-Flow Overhaul
+
+Parts 1–7 produced a mechanically sound, exploit-free game. Part 8 addresses
+*flow*: the moment-to-moment ergonomics that were fighting the player. Three
+pain points drove it — single-cursor friction (you can't flick on the left and
+catch on the right with one mouse), the 120 px/s slip feeling like an invisible
+tripwire, and RAM management feeling like chores. All additions are layered on
+top of the stable local-coordinate physics; none change the grounding model.
+
+### 8.1 Ergonomic launch: click-to-spring + catch cone
+
+- **Click-to-Spring.** A quick, near-stationary click on a window (or Spacebar
+  while hovering) calls `springPopWindow()`: a deterministic vertical impulse
+  (`FLOW.spring.impulse`) that launches a resting packet straight up with no
+  violent drag. A press→release under `clickMaxMs` with under `clickMaxMove` px
+  of travel counts as a click; anything longer is still a drag/flick for
+  directional trick shots. A per-window cooldown stops machine-gun popping.
+- **Catch Cone.** In `kinematicsSystem`, a falling packet within
+  `catchCone.height` px above (and `halfWidth` px around) a title bar gets a
+  mild horizontal acceleration toward the bar center, scaled by proximity. It's
+  a pure accel nudge — no teleport — so catching rewards good positioning
+  instead of sub-pixel mouse alignment, and it never destabilizes the solver.
+
+Together these dissolve the single-cursor bottleneck: you can click-launch from
+the left, move the mouse to the right, and the cone helps the window you grab
+there catch the incoming packet.
+
+### 8.2 Emergency Marquee Net (recovery)
+
+Dragging on empty wallpaper draws a standard translucent-blue OS selection box
+(`World.marquee`). Its **top edge is an elastic trampoline**: `marqueeNet()` (run
+first in the collision pipeline) bounces a falling packet that crosses it,
+scaled by `restitution` and guaranteed at least `minBounceVy`. Holding a marquee
+costs `marquee.ramCost` (15%) folded into `totalRam`, so it's a tactical clutch
+save, not a permanent floor — you pay memory to draw a net, and it vanishes on
+release.
+
+### 8.3 Flow Recycling (replaces window-closing chores)
+
+Instead of hunting tiny `[X]` buttons, windows auto-recycle as you progress:
+
+- `systems.ts` exposes a tiny `launchTracker` — the id of the window the packet
+  last **launched from**, and whether it has since **landed elsewhere** (set in
+  `detach`/`attach`, the only places those transitions happen).
+- `processRecycle()` (game layer) reacts: when the packet launches from A and
+  lands on B, A enters a `recycle.decommission` (2s) pulse, then dissolves with
+  a retro bitmap dither, **refunds its RAM**, and **awards a combo** (chained
+  within `comboWindow`). The source/sink are never recycled.
+
+The mental model shifts from "clean up clutter" to "lay track in front of an
+oncoming train" — the platform you just used clears itself and pays you for it.
+
+### 8.4 Elastic slip (fixing the tripwire)
+
+The Part 7 instant slip is replaced with a **telegraphed** one. When horizontal
+window speed exceeds `slipThreshold`, the packet enters a `slip.wobbleTime`
+(300ms) **wobble**: it keeps riding but renders an oscillating rotation and a
+yellow ⚠. Only if the over-speed drag continues past the wobble *without* an
+upward launch does it finally detach and fall. Steadying the drag (or flicking
+up) cancels the slip. Same anti-ferry guarantee, now with clear reaction time.
+
+### 8.5 Arcade pacing & score chain
+
+- **Delivery streak** (`streak`, 1..`streakMax`): climbs per delivery, resets on
+  any integrity loss; shown on the HUD and scaling the delivery chord's pitch.
+- **Difficulty ramp:** each delivery multiplies base patrol speed by
+  `1 + speedupPerWin` (capped), written into `CONFIG.patrolSpeed` each frame
+  from an immutable base so the ramp is reversible on reset.
+- **Juice:** a delivery triggers `shake` (screen-shake, decayed in-game and
+  applied as a render transform) and an **ascending musical chord**
+  (`cueDeliverChord`, pitched up with the streak). Leapfrog recycles show a
+  combo meter.
+
+### 8.6 Verification
+
+A headless suite covers every feature: spring pop launches a resting packet
+(−780 px/s) and honors its cooldown and the protected-window rule; the catch
+cone pulls a falling packet toward a bar center (vx −30 px/s); the marquee costs
+15% RAM while held and bounces a falling packet to its −620 floor; leapfrog
+recycle decommissions and dissolves the launch-from window, refunds RAM, and
+awards a combo; the elastic slip shows the wobble telegraph, keeps the packet
+grounded through the grace window, and slips only afterward; and the streak,
+speed ramp, and screen-shake fire on delivery with the streak resetting on
+integrity loss. A 9000-frame run of the full loop stays finite and bounded
+(~1662 px/s peak), confirming the physics core is untouched.

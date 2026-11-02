@@ -88,3 +88,28 @@ export function cueGcSweep(): void {
   note(900, 0.25, 'square', 0.4, 90);
   note(300, 0.3, 'sawtooth', 0.3, 60);
 }
+
+/** Mechanical "boing" when a window spring-pops the packet (click-to-spring). */
+export function cueSpring(): void {
+  note(300, 0.12, 'square', 0.45, 680);
+}
+
+/** Rubbery bounce off the marquee safety net. */
+export function cueNet(): void {
+  note(240, 0.14, 'sine', 0.5, 520);
+  note(480, 0.1, 'triangle', 0.25);
+}
+
+/** Retro bitmap "dissolve" blip when a window auto-recycles. */
+export function cueRecycle(): void {
+  note(620, 0.1, 'square', 0.3, 180);
+}
+
+/** Rising delivery chord (streak-scaled pitch handled by caller via semitones). */
+export function cueDeliverChord(semitoneBoost = 0): void {
+  const base = 523 * Math.pow(2, semitoneBoost / 12);
+  [0, 4, 7, 12].forEach((st, i) => {
+    if (typeof window === 'undefined') return;
+    window.setTimeout(() => note(base * Math.pow(2, st / 12), 0.26, 'sine', 0.5), i * 70);
+  });
+}

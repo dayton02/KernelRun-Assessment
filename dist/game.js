@@ -8,9 +8,10 @@
 //   - win: packet overlaps the sink drop zone -> celebrate -> reset level
 //
 // gameSystem(world, g, dt) runs AFTER the physics step each frame.
-import { GAME, CONFIG } from './config.js';
+import { GAME, CONFIG, FLOW } from './config.js';
 import { WindowKind } from './components.js';
-import { cueWin, cueIntegrityLoss, cueDissolve, cueGcSweep } from './audio.js';
+import { cueIntegrityLoss, cueDissolve, cueGcSweep, cueRecycle, cueDeliverChord } from './audio.js';
+import { launchTracker } from './systems.js';
 export var GamePhase;
 (function (GamePhase) {
     GamePhase["PLAYING"] = "PLAYING";
@@ -31,6 +32,11 @@ export function makeGameState() {
         wins: 0,
         resets: 0,
         gcSweeps: 0,
+        streak: 1,
+        combo: 0,
+        comboTtl: 0,
+        speedMul: 1,
+        shake: 0,
     };
 }
 const SINK_W = 200;
@@ -134,9 +140,10 @@ export function baseRam(world) {
     }
     return ram;
 }
-/** Total Memory Usage = base allocation + accumulated live leak, clamped. */
+/** Total Memory Usage = base allocation + leak + any held marquee, clamped. */
 export function totalRam(world, g) {
-    return Math.min(GAME.ramMax, baseRam(world) + g.leakedRam);
+    const marqueeCost = world.marquee.active ? FLOW.marquee.ramCost : 0;
+    return Math.min(GAME.ramMax, baseRam(world) + g.leakedRam + marqueeCost);
 }
 /** Back-compat alias (older callers/tests). */
 export function computeRam(world) {
@@ -171,10 +178,53 @@ function banner(g, msg, ttl = 1.6) {
     g.message = msg;
     g.messageTtl = ttl;
 }
+/** Immutable base patrol speed; the difficulty ramp scales this into CONFIG. */
+const BASE_PATROL = CONFIG.patrolSpeed;
+/**
+ * Leapfrog Auto-Recycle (Part 8): when the packet has launched from window A
+ * and landed elsewhere, mark A for decommissioning (a 2s pulse), then dissolve
+ * it, refund its RAM, and award a combo. Replaces hunting for tiny [X] boxes.
+ */
+function processRecycle(world, g, dt) {
+    // trigger: physics flagged that we landed on a different window than launch
+    if (launchTracker.landedElsewhere && launchTracker.lastLaunchWin != null) {
+        const src = world.windows.find((w) => w.id === launchTracker.lastLaunchWin);
+        if (src && !src.arch.protectedWin && src.drag.recycleTimer === 0 && src.style.closing === 0) {
+            src.drag.recycleTimer = FLOW.recycle.decommission; // begin the pulse
+        }
+        launchTracker.landedElsewhere = false;
+        launchTracker.lastLaunchWin = null;
+    }
+    // advance decommission pulses; dissolve + reward when they elapse
+    if (g.comboTtl > 0) {
+        g.comboTtl -= dt;
+        if (g.comboTtl <= 0)
+            g.combo = 0;
+    }
+    for (const w of world.windows) {
+        if (w.drag.recycleTimer > 0) {
+            w.drag.recycleTimer -= dt;
+            if (w.drag.recycleTimer <= 0 && w.style.closing === 0) {
+                w.style.closing = 0.0001; // retro fade-out (render handles look)
+                g.leakedRam = Math.max(0, g.leakedRam - GAME.ramPerWindow); // RAM refund
+                g.combo = Math.min(FLOW.recycle.comboMax, g.combo + 1);
+                g.comboTtl = FLOW.recycle.comboWindow;
+                cueRecycle();
+            }
+        }
+    }
+}
 /** The game system: run once per frame AFTER the physics step. */
 export function gameSystem(world, g, dt) {
     if (g.messageTtl > 0)
         g.messageTtl -= dt;
+    // difficulty ramp: scale patrol speed by the delivery count (Part 8)
+    CONFIG.patrolSpeed = BASE_PATROL * g.speedMul;
+    // screen-shake decay
+    if (g.shake > 0)
+        g.shake = Math.max(0, g.shake - FLOW.pacing.shakeDecay * dt);
+    // leapfrog auto-recycle + combo meter
+    processRecycle(world, g, dt);
     // --- LIVE MEMORY LEAK (Part 7) ---------------------------------------
     // Each open auxiliary window leaks RAM continuously. Closing windows lowers
     // the open count (and drops base RAM instantly), slowing the leak.
@@ -212,14 +262,19 @@ export function gameSystem(world, g, dt) {
     if (sink && overlapsDropZone(a.tf.pos.x, a.tf.pos.y, a.shape.radius, sink)) {
         g.phase = GamePhase.WON;
         g.freeze = GAME.winFreeze;
-        banner(g, 'PACKET DELIVERED ✓', GAME.winFreeze);
-        cueWin();
+        // arcade pacing: bump streak (1..max), ramp difficulty, shake + chord
+        g.streak = Math.min(FLOW.pacing.streakMax, g.streak + 1);
+        g.speedMul = Math.min(FLOW.pacing.speedupMax, g.speedMul * (1 + FLOW.pacing.speedupPerWin));
+        g.shake = FLOW.pacing.shakeOnWin;
+        banner(g, `PACKET DELIVERED ✓  ${g.streak}x`, GAME.winFreeze);
+        cueDeliverChord((g.streak - 1) * 2); // higher chord as the streak climbs
         return;
     }
     // --- FAIL: fell past the taskbar (bottom kill line) ---
     const killY = world.height - GAME.taskbarH;
     if (a.tf.pos.y - a.shape.radius > killY) {
         g.integrity -= GAME.integrityPenalty;
+        g.streak = 1; // integrity loss breaks the streak
         if (g.integrity <= 0) {
             g.integrity = 0;
             g.phase = GamePhase.DISSOLVING;

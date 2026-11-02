@@ -38,6 +38,27 @@ Full design rationale, ECS layout, state tables, and the physics math are in
   freely**. So the path is: flick off a left-side window → across the firewall
   in the air → catch on a right-side window → into the sink.
 
+## Controls & flow (Part 8)
+
+- **Click a window** (quick tap) or press **Space** while hovering it — a
+  deterministic **Spring Pop** launches a resting packet straight up. No violent
+  drag needed.
+- **Drag + flick** a window upward for directional trick shots (dotted
+  trajectory arc previews the launch).
+- **Catch cone:** a falling packet gently snaps toward a title bar it's about to
+  land on, so good positioning catches it — no pixel-perfect aiming.
+- **Drag on empty wallpaper** to draw a blue **marquee net**; its top edge
+  bounces a falling packet (a clutch save). Costs 15% RAM while held.
+- **Leapfrog auto-recycle:** the window you just launched *from* dissolves on its
+  own once the packet lands elsewhere — refunding RAM and building a combo. No
+  hunting for `[X]` buttons.
+- **Elastic slip:** dragging a carrying window sideways too fast first makes the
+  packet **wobble** (yellow ⚠) for a moment; only continued over-speed dragging
+  slips it off. Flick up or steady the drag to recover.
+- **Streak & difficulty:** each delivery raises a streak multiplier (resets on
+  integrity loss) and ramps the packet's base speed, with screen-shake and an
+  ascending chord.
+
 ## What to try
 
 - **Drag a title bar** under the packet — it rides the moving platform

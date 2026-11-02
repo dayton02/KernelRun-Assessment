@@ -11,6 +11,20 @@ export interface Pointer {
   released: boolean;  // edge: became up this frame
 }
 
+/** Emergency Marquee Net state (Part 8). Normalized bounds via helpers. */
+export interface Marquee {
+  active: boolean;        // currently being held/drawn
+  x0: number; y0: number; // anchor (press point)
+  x1: number; y1: number; // current drag point
+  cool: number;           // short re-bounce cooldown so one net pops once/arc
+}
+
+export function marqueeBounds(m: Marquee): { x: number; y: number; w: number; h: number } {
+  const x = Math.min(m.x0, m.x1);
+  const y = Math.min(m.y0, m.y1);
+  return { x, y, w: Math.abs(m.x1 - m.x0), h: Math.abs(m.y1 - m.y0) };
+}
+
 /** Build the per-kind archetype state with sensible defaults. */
 export function makeArchetype(kind: WindowKind, baseY: number): Archetype {
   return {
@@ -54,6 +68,11 @@ export class World {
   // airborne packets pass through freely. (Part 7, environmental partition.)
   firewallX: number;
   firewallW = 8;
+  // Emergency Marquee Net (Part 8): a selection box the player drags on empty
+  // wallpaper. Its top edge is an elastic trampoline; costs RAM while held.
+  marquee: Marquee = { active: false, x0: 0, y0: 0, x1: 0, y1: 0, cool: 0 };
+  // Keyboard: spacebar edge for click-to-spring on the hovered window.
+  springKey = false;
   private nextId = 1;
 
   constructor(width: number, height: number) {
@@ -74,6 +93,9 @@ export class World {
         groundEntity: null,
         localOffsetX: 0,
         spawnDwell: 0,
+        wobble: 0,
+        ejectVx: 0,
+        ejectVy: 0,
       },
     };
   }
@@ -89,7 +111,10 @@ export class World {
       rect: { x, y, w, h, z: this.windows.length },
       prev: { x, y, w, h },
       style: { title, closing: 0, hue },
-      drag: { grabbed: false, grabDX: 0, grabDY: 0, titleBarH: 26, vx: 0, vy: 0 },
+      drag: {
+        grabbed: false, grabDX: 0, grabDY: 0, titleBarH: 26, vx: 0, vy: 0,
+        springCooldown: 0, springPop: 0, recycleTimer: 0,
+      },
       arch: makeArchetype(kind, y),
     };
     this.windows.push(win);
