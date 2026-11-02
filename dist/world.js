@@ -1,6 +1,6 @@
 // The World holds entities. Systems operate on it. This is the ECS "store".
 import { FsmState, WindowKind } from './components.js';
-import { CONFIG, ARCH } from './config.js';
+import { CONFIG, ARCH, GAME } from './config.js';
 /** Build the per-kind archetype state with sensible defaults. */
 export function makeArchetype(kind, baseY) {
     return {
@@ -23,15 +23,25 @@ export function makeArchetype(kind, baseY) {
         crumble: ARCH.bsod.integrity,
         crumbleMax: ARCH.bsod.integrity,
         dismissed: false,
+        // alert (Temp Alert Modal)
+        alertTimer: GAME.alert.countdown,
+        alertMax: GAME.alert.countdown,
+        // audio-player pulse
+        pulseTimer: 0,
+        pulseUp: false,
+        // game roles
+        protectedWin: kind === WindowKind.SPAWN || kind === WindowKind.SINK,
     };
 }
 export class World {
     constructor(width, height) {
         this.windows = [];
         this.pointer = { x: 0, y: 0, down: false, pressed: false, released: false };
+        this.firewallW = 8;
         this.nextId = 1;
         this.width = width;
         this.height = height;
+        this.firewallX = Math.round(width * 0.5);
         this.agent = {
             id: this.alloc(),
             tf: { pos: { x: width * 0.3, y: 80 }, prev: { x: width * 0.3, y: 80 } },

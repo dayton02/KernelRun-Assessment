@@ -22,6 +22,12 @@ export const CONFIG = {
   detachMaxVx: 400,       // hard clamp on transferred horizontal velocity (px/s)
   flickThreshold: 350,    // |window vy| must exceed this (upward) to launch
 
+  // --- anti-ferry inertial slip (Part 7) --------------------------------
+  // A grounded packet loses footing if its window is dragged sideways faster
+  // than this WITHOUT an upward flick. Prevents ferrying the packet across the
+  // desktop by slow horizontal drag.
+  slipThreshold: 120,     // |window vx| px/s above which the packet slips off
+
   // wall slide (DESIGN.md §3.6)
   slideMaxFall: 260,
   wallFriction: 0.8,
@@ -74,4 +80,38 @@ export const ARCH = {
     dismissSpreadX: 480,    // horizontal kick away from the dismiss point
     shardGravity: 0.0,      // crumbled fragments are non-solid
   },
+};
+
+// ---------------------------------------------------------------------------
+// "Kernel Run" game-loop tunables (objective, integrity, RAM, archetypes).
+// ---------------------------------------------------------------------------
+export const GAME = {
+  integrityStart: 100,       // Data Integrity %
+  integrityPenalty: 25,      // % lost each time the packet falls past the taskbar
+  taskbarH: 28,              // height of the bottom taskbar (the kill line is its top)
+
+  // RAM / Memory Usage constraint
+  ramMax: 100,               // %
+  ramPerWindow: 8,           // flat base cost to keep a window open
+  ramPerArea: 1 / 1400,      // additional % per px^2 of window area
+  ramSpawnBlock: 96,         // cannot spawn new windows at/above this usage
+  // Live memory leak (Part 7): each open non-essential window leaks RAM
+  // continuously. Total leak rate = ramLeakPerWindow * openCount per second.
+  ramLeakPerWindow: 0.5,     // % per second, per open auxiliary window
+
+  // Audio Player pulse (spec: +/-10px every 500ms)
+  pulse: {
+    amplitude: 10,           // px the top edge moves
+    halfPeriod: 0.5,         // seconds per half-cycle (toggles every 500ms)
+    bounceBonus: 1.15,       // mild restitution when landing on the rising edge
+  },
+
+  // Temp Alert Modal
+  alert: {
+    countdown: 5.0,          // seconds before it auto-closes
+    earlyRestitution: 1.5,   // +50% launch restitution if flicked before expiry
+  },
+
+  // win handling
+  winFreeze: 1.2,            // seconds of celebration before level reset
 };

@@ -20,5 +20,9 @@ export var WindowKind;
     WindowKind["MEDIA"] = "MEDIA";
     WindowKind["EDITOR"] = "EDITOR";
     WindowKind["BSOD"] = "BSOD";
+    // --- Kernel Run game roles ---
+    WindowKind["SPAWN"] = "SPAWN";
+    WindowKind["SINK"] = "SINK";
+    WindowKind["ALERT"] = "ALERT";
 })(WindowKind || (WindowKind = {}));
 //# sourceMappingURL=components.js.map

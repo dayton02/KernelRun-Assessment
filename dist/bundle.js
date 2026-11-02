@@ -26,6 +26,12 @@
     // hard clamp on transferred horizontal velocity (px/s)
     flickThreshold: 350,
     // |window vy| must exceed this (upward) to launch
+    // --- anti-ferry inertial slip (Part 7) --------------------------------
+    // A grounded packet loses footing if its window is dragged sideways faster
+    // than this WITHOUT an upward flick. Prevents ferrying the packet across the
+    // desktop by slow horizontal drag.
+    slipThreshold: 120,
+    // |window vx| px/s above which the packet slips off
     // wall slide (DESIGN.md §3.6)
     slideMaxFall: 260,
     wallFriction: 0.8,
@@ -99,6 +105,46 @@
       // crumbled fragments are non-solid
     }
   };
+  var GAME = {
+    integrityStart: 100,
+    // Data Integrity %
+    integrityPenalty: 25,
+    // % lost each time the packet falls past the taskbar
+    taskbarH: 28,
+    // height of the bottom taskbar (the kill line is its top)
+    // RAM / Memory Usage constraint
+    ramMax: 100,
+    // %
+    ramPerWindow: 8,
+    // flat base cost to keep a window open
+    ramPerArea: 1 / 1400,
+    // additional % per px^2 of window area
+    ramSpawnBlock: 96,
+    // cannot spawn new windows at/above this usage
+    // Live memory leak (Part 7): each open non-essential window leaks RAM
+    // continuously. Total leak rate = ramLeakPerWindow * openCount per second.
+    ramLeakPerWindow: 0.5,
+    // % per second, per open auxiliary window
+    // Audio Player pulse (spec: +/-10px every 500ms)
+    pulse: {
+      amplitude: 10,
+      // px the top edge moves
+      halfPeriod: 0.5,
+      // seconds per half-cycle (toggles every 500ms)
+      bounceBonus: 1.15
+      // mild restitution when landing on the rising edge
+    },
+    // Temp Alert Modal
+    alert: {
+      countdown: 5,
+      // seconds before it auto-closes
+      earlyRestitution: 1.5
+      // +50% launch restitution if flicked before expiry
+    },
+    // win handling
+    winFreeze: 1.2
+    // seconds of celebration before level reset
+  };
 
   // src/world.ts
   function makeArchetype(kind, baseY) {
@@ -121,16 +167,26 @@
       // bsod
       crumble: ARCH.bsod.integrity,
       crumbleMax: ARCH.bsod.integrity,
-      dismissed: false
+      dismissed: false,
+      // alert (Temp Alert Modal)
+      alertTimer: GAME.alert.countdown,
+      alertMax: GAME.alert.countdown,
+      // audio-player pulse
+      pulseTimer: 0,
+      pulseUp: false,
+      // game roles
+      protectedWin: kind === "SPAWN" /* SPAWN */ || kind === "SINK" /* SINK */
     };
   }
   var World = class {
     constructor(width, height) {
       this.windows = [];
       this.pointer = { x: 0, y: 0, down: false, pressed: false, released: false };
+      this.firewallW = 8;
       this.nextId = 1;
       this.width = width;
       this.height = height;
+      this.firewallX = Math.round(width * 0.5);
       this.agent = {
         id: this.alloc(),
         tf: { pos: { x: width * 0.3, y: 80 }, prev: { x: width * 0.3, y: 80 } },
@@ -250,6 +306,9 @@
         case "BSOD" /* BSOD */:
           updateBsod(w, dt);
           break;
+        case "ALERT" /* ALERT */:
+          updateAlert(w, dt);
+          break;
         default:
           break;
       }
@@ -277,6 +336,13 @@
   }
   function updateMedia(w, dt) {
     const m = ARCH.media;
+    const p = GAME.pulse;
+    w.arch.pulseTimer += dt;
+    if (w.arch.pulseTimer >= p.halfPeriod) {
+      w.arch.pulseTimer -= p.halfPeriod;
+      w.arch.pulseUp = !w.arch.pulseUp;
+    }
+    const pulseOffset = w.arch.pulseUp ? -p.amplitude : p.amplitude;
     const beatPeriod = 60 / w.arch.bpm;
     const prevPhase = w.arch.phase;
     w.arch.phase += dt;
@@ -285,11 +351,16 @@
     w.arch.onBeat = nowBeat !== prevBeat;
     const intoBeat = w.arch.phase % beatPeriod / beatPeriod;
     w.arch.beatPulse = Math.pow(1 - intoBeat, 2);
-    const offset = -m.amplitude * w.arch.beatPulse;
     if (!w.drag.grabbed) {
-      w.rect.y = w.arch.baseY + offset;
+      w.rect.y = w.arch.baseY + pulseOffset;
     } else {
-      w.arch.baseY = w.rect.y - offset;
+      w.arch.baseY = w.rect.y - pulseOffset;
+    }
+  }
+  function updateAlert(w, dt) {
+    w.arch.alertTimer -= dt;
+    if (w.arch.alertTimer <= 0 && w.style.closing === 0) {
+      w.style.closing = 1e-4;
     }
   }
   function updateEditor(world, w, dt) {
@@ -327,10 +398,9 @@
     }
   }
   function mediaContact(w) {
-    const m = ARCH.media;
-    if (w.arch.beatPulse > 0.6) {
-      const bonus = w.arch.onBeat ? m.onBeatBonus : m.offBeatBonus;
-      const speed = m.amplitude * m.launchGain * w.arch.beatPulse * bonus;
+    const p = GAME.pulse;
+    if (w.arch.pulseUp) {
+      const speed = CONFIG.edgeJumpImpulse * p.bounceBonus;
       return { launchVy: -clamp(speed, 0, CONFIG.launchMax), forceLaunch: true };
     }
     return {};
@@ -389,6 +459,67 @@
     a.state.groundEntity = null;
   }
 
+  // src/audio.ts
+  var ctx = null;
+  var master = null;
+  var enabled = true;
+  function initAudio() {
+    if (typeof window === "undefined") return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) {
+      enabled = false;
+      return;
+    }
+    if (!ctx) {
+      ctx = new AC();
+      master = ctx.createGain();
+      master.gain.value = 0.18;
+      master.connect(ctx.destination);
+    }
+    if (ctx.state === "suspended") void ctx.resume();
+  }
+  function note(freq, dur, type = "sine", startGain = 0.6, slideTo) {
+    if (!enabled || !ctx || !master) return;
+    const t0 = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    if (slideTo != null) osc.frequency.exponentialRampToValueAtTime(Math.max(1, slideTo), t0 + dur);
+    g.gain.setValueAtTime(startGain, t0);
+    g.gain.exponentialRampToValueAtTime(1e-4, t0 + dur);
+    osc.connect(g).connect(master);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.02);
+  }
+  function cueLand() {
+    note(220, 0.08, "triangle", 0.5);
+  }
+  function cueLaunch() {
+    note(440, 0.1, "sine", 0.5, 740);
+    note(660, 0.14, "sine", 0.3, 990);
+  }
+  function cueIntegrityLoss() {
+    note(300, 0.16, "sawtooth", 0.5, 120);
+    note(150, 0.2, "square", 0.3);
+  }
+  function cueWin() {
+    if (!ctx) return;
+    [523, 659, 784, 1047].forEach((f, i) => {
+      window.setTimeout(() => note(f, 0.22, "sine", 0.5), i * 90);
+    });
+  }
+  function cueDissolve() {
+    note(110, 0.4, "sawtooth", 0.5, 40);
+  }
+  function cueSlip() {
+    note(520, 0.09, "sawtooth", 0.4, 240);
+  }
+  function cueGcSweep() {
+    note(900, 0.25, "square", 0.4, 90);
+    note(300, 0.3, "sawtooth", 0.3, 60);
+  }
+
   // src/systems.ts
   function inputSystem(world) {
     const p = world.pointer;
@@ -396,7 +527,13 @@
       const win = world.topWindowAt(p.x, p.y);
       if (win) {
         const closeX = win.rect.x + win.rect.w - 20;
-        if (p.x >= closeX && p.y <= win.rect.y + win.drag.titleBarH) {
+        const onCloseBox = p.x >= closeX && p.y <= win.rect.y + win.drag.titleBarH;
+        if (onCloseBox && win.arch.protectedWin) {
+          win.drag.grabbed = true;
+          win.drag.grabDX = p.x - win.rect.x;
+          win.drag.grabDY = p.y - win.rect.y;
+          world.bringToFront(win);
+        } else if (onCloseBox) {
           if (win.arch.kind === "BSOD" /* BSOD */) {
             bsodDismiss(world, win, p.x);
           } else {
@@ -422,6 +559,14 @@
       if (w.drag.grabbed) {
         w.rect.x = p.x - w.drag.grabDX;
         w.rect.y = p.y - w.drag.grabDY;
+        const barL = world.firewallX - world.firewallW / 2;
+        const barR = world.firewallX + world.firewallW / 2;
+        const prevCenter = px + w.rect.w / 2;
+        if (prevCenter < world.firewallX) {
+          if (w.rect.x + w.rect.w > barL) w.rect.x = barL - w.rect.w;
+        } else {
+          if (w.rect.x < barR) w.rect.x = barR;
+        }
       }
       const rawVx = clamp((w.rect.x - px) / dt, -CONFIG.rawDeltaClamp, CONFIG.rawDeltaClamp);
       const rawVy = clamp((w.rect.y - py) / dt, -CONFIG.rawDeltaClamp, CONFIG.rawDeltaClamp);
@@ -508,6 +653,7 @@
               detach(world, w);
               a.state.fsm = "LAUNCHED" /* LAUNCHED */;
               landedOn = null;
+              cueLaunch();
             }
           }
         }
@@ -539,6 +685,17 @@
     if (s.grounded && s.groundEntity != null) {
       const gw = world.windows.find((w) => w.id === s.groundEntity);
       if (gw) {
+        const upwardFlick = gw.drag.vy < -CONFIG.flickThreshold;
+        if (!upwardFlick && Math.abs(gw.drag.vx) > CONFIG.slipThreshold) {
+          s.grounded = false;
+          s.groundEntity = null;
+          a.kin.vel.x = 0;
+          a.kin.vel.y = Math.max(a.kin.vel.y, 0);
+          a.state.fsm = "FALLING" /* FALLING */;
+          cueSlip();
+          s.wall = newWall;
+          return;
+        }
         s.localOffsetX += s.dir * CONFIG.patrolSpeed * dt;
         const lo = r;
         const hi = gw.rect.w - r;
@@ -585,6 +742,7 @@
         world.agent.shape.radius,
         w.rect.w - world.agent.shape.radius
       );
+      cueLand();
     }
   }
   function detach(world, w) {
@@ -610,8 +768,13 @@
     const vy = w.drag.vy;
     if (vy < -CONFIG.flickThreshold) {
       detach(world, w);
-      a.kin.vel.y = clamp(vy * CONFIG.restitution, -CONFIG.launchMax, 0);
+      let e = CONFIG.restitution;
+      if (w.arch.kind === "ALERT" /* ALERT */ && w.arch.alertTimer > 0) {
+        e *= GAME.alert.earlyRestitution;
+      }
+      a.kin.vel.y = clamp(vy * e, -CONFIG.launchMax, 0);
       a.state.fsm = "LAUNCHED" /* LAUNCHED */;
+      cueLaunch();
     }
   }
   function postFsmSystem(world) {
@@ -636,30 +799,206 @@
     world.pointer.released = false;
   }
 
+  // src/game.ts
+  function makeGameState() {
+    return {
+      phase: "PLAYING" /* PLAYING */,
+      integrity: GAME.integrityStart,
+      ram: 0,
+      leakedRam: 0,
+      spawnId: null,
+      sinkId: null,
+      freeze: 0,
+      message: "",
+      messageTtl: 0,
+      wins: 0,
+      resets: 0,
+      gcSweeps: 0
+    };
+  }
+  function buildLevel(world, g) {
+    world.windows = [];
+    const spawn = world.spawnWindow(40, 110, 190, 96, "Download_Manager", 205, "SPAWN" /* SPAWN */);
+    g.spawnId = spawn.id;
+    const sink = world.spawnWindow(world.width - 230, world.height - 220, 200, 150, "Backup_Drive (D:)", 135, "SINK" /* SINK */);
+    g.sinkId = sink.id;
+    world.spawnWindow(300, 250, 170, 110, "bash", 150, "TERMINAL" /* TERMINAL */);
+    world.spawnWindow(520, 320, 150, 110, "player.fm", 320, "MEDIA" /* MEDIA */);
+    world.spawnWindow(250, 430, 160, 100, "Temp Alert", 35, "ALERT" /* ALERT */);
+    placePacketAtSpawn(world, g);
+    g.phase = "PLAYING" /* PLAYING */;
+    g.integrity = GAME.integrityStart;
+    g.leakedRam = 0;
+  }
+  function auxWindowCount(world) {
+    let n = 0;
+    for (const w of world.windows) {
+      if (w.style.closing > 0 || w.arch.protectedWin) continue;
+      n++;
+    }
+    return n;
+  }
+  function placePacketAtSpawn(world, g) {
+    const spawn = world.windows.find((w) => w.id === g.spawnId);
+    const a = world.agent;
+    const px = spawn ? spawn.rect.x + spawn.rect.w - 24 : world.width * 0.1;
+    const py = spawn ? spawn.rect.y - a.shape.radius : 80;
+    a.tf.pos.x = px;
+    a.tf.pos.y = py;
+    a.tf.prev.x = px;
+    a.tf.prev.y = py;
+    a.kin.vel.x = CONFIG.patrolSpeed;
+    a.kin.vel.y = 0;
+    a.state.grounded = false;
+    a.state.groundEntity = null;
+    a.state.localOffsetX = 0;
+    a.state.dir = 1;
+  }
+  function baseRam(world) {
+    let ram = 0;
+    for (const w of world.windows) {
+      if (w.style.closing > 0) continue;
+      if (w.arch.protectedWin) continue;
+      ram += GAME.ramPerWindow + w.rect.w * w.rect.h * GAME.ramPerArea;
+    }
+    return ram;
+  }
+  function totalRam(world, g) {
+    return Math.min(GAME.ramMax, baseRam(world) + g.leakedRam);
+  }
+  function canSpawn(world, g) {
+    const used = g ? totalRam(world, g) : baseRam(world);
+    return used < GAME.ramSpawnBlock;
+  }
+  function emergencyGc(world, g) {
+    for (const w of world.windows) {
+      if (w.arch.protectedWin) continue;
+      if (w.style.closing === 0) w.style.closing = 1e-4;
+    }
+    const a = world.agent;
+    a.state.grounded = false;
+    a.state.groundEntity = null;
+    g.leakedRam = 0;
+    g.gcSweeps++;
+    banner(g, "\u26A0 OUT OF MEMORY \u2014 GC SWEEP", 1.4);
+    cueGcSweep();
+  }
+  function banner(g, msg, ttl = 1.6) {
+    g.message = msg;
+    g.messageTtl = ttl;
+  }
+  function gameSystem(world, g, dt) {
+    if (g.messageTtl > 0) g.messageTtl -= dt;
+    const openCount = auxWindowCount(world);
+    g.leakedRam += GAME.ramLeakPerWindow * openCount * dt;
+    g.ram = totalRam(world, g);
+    if (g.ram >= GAME.ramMax && openCount > 0) {
+      emergencyGc(world, g);
+      g.ram = totalRam(world, g);
+    }
+    if (g.phase !== "PLAYING" /* PLAYING */) {
+      g.freeze -= dt;
+      if (g.freeze <= 0) {
+        if (g.phase === "DISSOLVING" /* DISSOLVING */) {
+          g.resets++;
+          placePacketAtSpawn(world, g);
+        }
+        if (g.phase === "WON" /* WON */) {
+          g.wins++;
+          buildLevel(world, g);
+        }
+        g.phase = "PLAYING" /* PLAYING */;
+      }
+      return;
+    }
+    const a = world.agent;
+    const sink = world.windows.find((w) => w.id === g.sinkId);
+    if (sink && overlapsDropZone(a.tf.pos.x, a.tf.pos.y, a.shape.radius, sink)) {
+      g.phase = "WON" /* WON */;
+      g.freeze = GAME.winFreeze;
+      banner(g, "PACKET DELIVERED \u2713", GAME.winFreeze);
+      cueWin();
+      return;
+    }
+    const killY = world.height - GAME.taskbarH;
+    if (a.tf.pos.y - a.shape.radius > killY) {
+      g.integrity -= GAME.integrityPenalty;
+      if (g.integrity <= 0) {
+        g.integrity = 0;
+        g.phase = "DISSOLVING" /* DISSOLVING */;
+        g.freeze = 0.9;
+        banner(g, "PACKET DISSOLVED \u2014 restarting", 0.9);
+        cueDissolve();
+      } else {
+        banner(g, `DATA INTEGRITY ${g.integrity}%`, 1.2);
+        cueIntegrityLoss();
+        placePacketAtSpawn(world, g);
+      }
+    }
+  }
+  function predictFlickArc(world) {
+    const a = world.agent;
+    if (!a.state.grounded || a.state.groundEntity == null) return [];
+    const gw = world.windows.find((w) => w.id === a.state.groundEntity);
+    if (!gw || !gw.drag.grabbed) return [];
+    const vy = gw.drag.vy;
+    if (vy >= -CONFIG.flickThreshold) return [];
+    let e = CONFIG.restitution;
+    if (gw.arch.kind === "ALERT" /* ALERT */ && gw.arch.alertTimer > 0) e *= GAME.alert.earlyRestitution;
+    const launchVy = Math.max(-CONFIG.launchMax, vy * e);
+    const launchVx = clampNum(gw.drag.vx * CONFIG.detachDamping, -CONFIG.detachMaxVx, CONFIG.detachMaxVx) + a.state.dir * CONFIG.patrolSpeed;
+    const pts = [];
+    let px = a.tf.pos.x, py = a.tf.pos.y;
+    let pvx = launchVx, pvy = launchVy;
+    const dt = CONFIG.dt * 4;
+    for (let i = 0; i < 28; i++) {
+      pvy += CONFIG.gravity * dt;
+      px += pvx * dt;
+      py += pvy * dt;
+      if (py > world.height || px < 0 || px > world.width) break;
+      if (i % 2 === 0) pts.push({ x: px, y: py });
+    }
+    return pts;
+  }
+  function clampNum(v, lo, hi) {
+    return v < lo ? lo : v > hi ? hi : v;
+  }
+  function overlapsDropZone(x, y, r, sink) {
+    const zx = sink.rect.x;
+    const zy = sink.rect.y + sink.drag.titleBarH;
+    const zw = sink.rect.w;
+    const zh = sink.rect.h - sink.drag.titleBarH;
+    return x + r > zx && x - r < zx + zw && y + r > zy && y - r < zy + zh;
+  }
+
   // src/render.ts
   var KIND_TAG = {
     ["PLAIN" /* PLAIN */]: "",
     ["TERMINAL" /* TERMINAL */]: " [sh]",
     ["MEDIA" /* MEDIA */]: " [\u266A]",
     ["EDITOR" /* EDITOR */]: " [txt]",
-    ["BSOD" /* BSOD */]: " [ERR]"
+    ["BSOD" /* BSOD */]: " [ERR]",
+    ["SPAWN" /* SPAWN */]: " [SRC]",
+    ["SINK" /* SINK */]: " [DST]",
+    ["ALERT" /* ALERT */]: " [!]"
   };
-  function render(ctx, world) {
-    ctx.clearRect(0, 0, world.width, world.height);
-    ctx.fillStyle = "#0b1020";
-    ctx.fillRect(0, 0, world.width, world.height);
-    drawGrid(ctx, world);
+  function render(ctx2, world, game) {
+    ctx2.clearRect(0, 0, world.width, world.height);
+    ctx2.fillStyle = "#0b1020";
+    ctx2.fillRect(0, 0, world.width, world.height);
+    drawGrid(ctx2, world);
+    drawFirewall(ctx2, world);
     const sorted = [...world.windows].sort((a2, b) => a2.rect.z - b.rect.z);
     for (const w of sorted) {
       const fade = w.style.closing > 0 ? Math.max(0, 1 - w.style.closing / 0.35) : 1;
-      ctx.globalAlpha = fade;
+      ctx2.globalAlpha = fade;
       const r = w.rect;
-      ctx.fillStyle = `hsl(${w.style.hue} 30% 16%)`;
-      ctx.fillRect(r.x, r.y, r.w, r.h);
-      ctx.strokeStyle = `hsl(${w.style.hue} 60% 55%)`;
-      ctx.lineWidth = 2;
-      ctx.strokeRect(r.x, r.y, r.w, r.h);
-      drawArchetype(ctx, w);
+      ctx2.fillStyle = `hsl(${w.style.hue} 30% 16%)`;
+      ctx2.fillRect(r.x, r.y, r.w, r.h);
+      ctx2.strokeStyle = `hsl(${w.style.hue} 60% 55%)`;
+      ctx2.lineWidth = 2;
+      ctx2.strokeRect(r.x, r.y, r.w, r.h);
+      drawArchetype(ctx2, w);
       let barL = 42;
       if (w.arch.kind === "MEDIA" /* MEDIA */) barL = 42 + 28 * w.arch.beatPulse;
       if (w.arch.kind === "BSOD" /* BSOD */) {
@@ -667,79 +1006,148 @@
         const flick = frac < 0.4 ? Math.sin(w.arch.crumbleMax * 40 - frac * 60) > 0 ? 55 : 25 : 42;
         barL = flick;
       }
-      ctx.fillStyle = `hsl(${w.style.hue} 55% ${barL}%)`;
-      ctx.fillRect(r.x, r.y, r.w, w.drag.titleBarH);
-      ctx.fillStyle = "#eaf0ff";
-      ctx.font = "13px system-ui, sans-serif";
-      ctx.fillText(w.style.title + KIND_TAG[w.arch.kind], r.x + 8, r.y + 18);
-      ctx.fillStyle = "#e4607a";
-      ctx.fillRect(r.x + r.w - 20, r.y + 6, 14, 14);
-      ctx.fillStyle = "#2a0c12";
-      ctx.fillText("x", r.x + r.w - 17, r.y + 18);
-      ctx.globalAlpha = 1;
+      ctx2.fillStyle = `hsl(${w.style.hue} 55% ${barL}%)`;
+      ctx2.fillRect(r.x, r.y, r.w, w.drag.titleBarH);
+      ctx2.fillStyle = "#eaf0ff";
+      ctx2.font = "13px system-ui, sans-serif";
+      ctx2.fillText(w.style.title + KIND_TAG[w.arch.kind], r.x + 8, r.y + 18);
+      ctx2.fillStyle = "#e4607a";
+      ctx2.fillRect(r.x + r.w - 20, r.y + 6, 14, 14);
+      ctx2.fillStyle = "#2a0c12";
+      ctx2.fillText("x", r.x + r.w - 17, r.y + 18);
+      ctx2.globalAlpha = 1;
+    }
+    if (game) {
+      const arc = predictFlickArc(world);
+      for (let i = 0; i < arc.length; i++) {
+        const p = arc[i];
+        const t = 1 - i / arc.length;
+        ctx2.globalAlpha = 0.3 + 0.5 * t;
+        ctx2.fillStyle = "#ffe08a";
+        ctx2.beginPath();
+        ctx2.arc(p.x, p.y, 3, 0, Math.PI * 2);
+        ctx2.fill();
+      }
+      ctx2.globalAlpha = 1;
     }
     const a = world.agent;
-    ctx.beginPath();
-    ctx.arc(a.tf.pos.x, a.tf.pos.y, a.shape.radius, 0, Math.PI * 2);
-    ctx.fillStyle = stateColor(a.state.fsm);
-    ctx.fill();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = "#ffffff";
-    ctx.stroke();
-    drawHud(ctx, world);
+    const dissolving = game?.phase === "DISSOLVING" /* DISSOLVING */;
+    ctx2.globalAlpha = dissolving ? Math.max(0, game.freeze / 0.9) : 1;
+    ctx2.beginPath();
+    ctx2.arc(a.tf.pos.x, a.tf.pos.y, a.shape.radius, 0, Math.PI * 2);
+    ctx2.fillStyle = stateColor(a.state.fsm);
+    ctx2.fill();
+    ctx2.lineWidth = 2;
+    ctx2.strokeStyle = "#ffffff";
+    ctx2.stroke();
+    ctx2.fillStyle = "#0b1020";
+    ctx2.font = "9px ui-monospace, monospace";
+    ctx2.fillText("0", a.tf.pos.x - 2.5, a.tf.pos.y + 3);
+    ctx2.globalAlpha = 1;
+    drawTaskbar(ctx2, world, game);
+    if (game) drawGameHud(ctx2, world, game);
+    else drawHud(ctx2, world);
   }
-  function drawArchetype(ctx, w) {
+  function drawTaskbar(ctx2, world, game) {
+    const h = GAME.taskbarH;
+    const y = world.height - h;
+    ctx2.fillStyle = "#141b2e";
+    ctx2.fillRect(0, y, world.width, h);
+    ctx2.strokeStyle = game && game.integrity <= 40 ? "rgba(255,90,90,0.8)" : "rgba(255,255,255,0.15)";
+    ctx2.setLineDash([6, 6]);
+    ctx2.lineWidth = 1;
+    ctx2.beginPath();
+    ctx2.moveTo(0, y);
+    ctx2.lineTo(world.width, y);
+    ctx2.stroke();
+    ctx2.setLineDash([]);
+    ctx2.fillStyle = "#7f8db0";
+    ctx2.font = "11px ui-monospace, monospace";
+    ctx2.fillText("\u25A3 taskbar \u2014 falling past this line costs Data Integrity", 10, y + 18);
+  }
+  function drawArchetype(ctx2, w) {
     const r = w.rect;
     switch (w.arch.kind) {
       case "TERMINAL" /* TERMINAL */: {
         const g = w.arch.gravityField;
-        ctx.fillStyle = g < 1 ? "rgba(120,200,255,0.08)" : g > 1 ? "rgba(255,150,120,0.08)" : "transparent";
-        ctx.fillRect(r.x, r.y - 120, r.w, 120);
-        ctx.fillStyle = "#6cff9a";
-        ctx.font = "11px ui-monospace, monospace";
-        ctx.fillText(g < 1 ? "> setgravity low" : g > 1 ? "> setgravity high" : "> _", r.x + 8, r.y + w.drag.titleBarH + 14);
+        ctx2.fillStyle = g < 1 ? "rgba(120,200,255,0.08)" : g > 1 ? "rgba(255,150,120,0.08)" : "transparent";
+        ctx2.fillRect(r.x, r.y - 120, r.w, 120);
+        ctx2.fillStyle = "#6cff9a";
+        ctx2.font = "11px ui-monospace, monospace";
+        ctx2.fillText(g < 1 ? "> setgravity low" : g > 1 ? "> setgravity high" : "> _", r.x + 8, r.y + w.drag.titleBarH + 14);
         for (const rung of w.arch.rungs) {
           const y = r.y + rung.localY;
           const alpha = Math.min(1, rung.life);
-          ctx.globalAlpha = alpha;
-          ctx.fillStyle = "#9ad9ff";
-          ctx.fillRect(r.x + r.w * 0.15, y - 3, rung.w, 6);
-          ctx.globalAlpha = 1;
+          ctx2.globalAlpha = alpha;
+          ctx2.fillStyle = "#9ad9ff";
+          ctx2.fillRect(r.x + r.w * 0.15, y - 3, rung.w, 6);
+          ctx2.globalAlpha = 1;
         }
         break;
       }
       case "MEDIA" /* MEDIA */: {
-        ctx.strokeStyle = "#ff8ad0";
-        ctx.lineWidth = 2;
+        ctx2.strokeStyle = "#ff8ad0";
+        ctx2.lineWidth = 2;
         const bars = 16;
         for (let i = 0; i < bars; i++) {
           const bx = r.x + 10 + i / bars * (r.w - 20);
           const amp = (0.3 + 0.7 * Math.abs(Math.sin(i * 1.3 + w.arch.phase * 6))) * w.arch.beatPulse;
           const bh = 6 + amp * (r.h - w.drag.titleBarH - 20);
-          ctx.beginPath();
-          ctx.moveTo(bx, r.y + r.h - 10);
-          ctx.lineTo(bx, r.y + r.h - 10 - bh);
-          ctx.stroke();
+          ctx2.beginPath();
+          ctx2.moveTo(bx, r.y + r.h - 10);
+          ctx2.lineTo(bx, r.y + r.h - 10 - bh);
+          ctx2.stroke();
         }
         break;
       }
       case "EDITOR" /* EDITOR */: {
         const fillFrac = (w.arch.chars - 10) / (180 - 10);
-        ctx.fillStyle = "rgba(255,230,120,0.12)";
-        ctx.fillRect(r.x, r.y + r.h - 6, r.w * fillFrac, 6);
+        ctx2.fillStyle = "rgba(255,230,120,0.12)";
+        ctx2.fillRect(r.x, r.y + r.h - 6, r.w * fillFrac, 6);
         if (w.arch.buoyancy > 0) {
-          ctx.fillStyle = "rgba(120,255,200,0.10)";
-          ctx.fillRect(r.x, r.y - 30, r.w, 30);
+          ctx2.fillStyle = "rgba(120,255,200,0.10)";
+          ctx2.fillRect(r.x, r.y - 30, r.w, 30);
         }
         break;
       }
       case "BSOD" /* BSOD */: {
         const frac = Math.max(0, w.arch.crumble / w.arch.crumbleMax);
-        ctx.fillStyle = frac < 0.4 ? "#ff5b5b" : "#ffd166";
-        ctx.fillRect(r.x, r.y + r.h - 5, r.w * frac, 5);
-        ctx.fillStyle = "#eaf0ff";
-        ctx.font = "12px ui-monospace, monospace";
-        ctx.fillText(":( FATAL_EXCEPTION", r.x + 10, r.y + r.h / 2);
+        ctx2.fillStyle = frac < 0.4 ? "#ff5b5b" : "#ffd166";
+        ctx2.fillRect(r.x, r.y + r.h - 5, r.w * frac, 5);
+        ctx2.fillStyle = "#eaf0ff";
+        ctx2.font = "12px ui-monospace, monospace";
+        ctx2.fillText(":( FATAL_EXCEPTION", r.x + 10, r.y + r.h / 2);
+        break;
+      }
+      case "SPAWN" /* SPAWN */: {
+        ctx2.fillStyle = "#7fd0ff";
+        ctx2.fillRect(r.x + r.w - 10, r.y - 6, 10, 10);
+        ctx2.fillStyle = "#9fb0d0";
+        ctx2.font = "11px ui-monospace, monospace";
+        ctx2.fillText("\u2193 downloading packet...", r.x + 10, r.y + r.h / 2);
+        break;
+      }
+      case "SINK" /* SINK */: {
+        const zy = r.y + w.drag.titleBarH;
+        const pulse = 0.12 + 0.08 * Math.abs(Math.sin(Date.now() / 300));
+        ctx2.fillStyle = `rgba(120,255,170,${pulse})`;
+        ctx2.fillRect(r.x, zy, r.w, r.h - w.drag.titleBarH);
+        ctx2.strokeStyle = "rgba(120,255,170,0.6)";
+        ctx2.setLineDash([5, 4]);
+        ctx2.strokeRect(r.x + 4, zy + 4, r.w - 8, r.h - w.drag.titleBarH - 8);
+        ctx2.setLineDash([]);
+        ctx2.fillStyle = "#bfffe0";
+        ctx2.font = "12px ui-monospace, monospace";
+        ctx2.fillText("DROP ZONE", r.x + r.w / 2 - 34, zy + (r.h - w.drag.titleBarH) / 2);
+        break;
+      }
+      case "ALERT" /* ALERT */: {
+        const frac = Math.max(0, w.arch.alertTimer / w.arch.alertMax);
+        ctx2.fillStyle = frac > 0.3 ? "#8affc0" : "#ff6b6b";
+        ctx2.fillRect(r.x, r.y + r.h - 5, r.w * frac, 5);
+        ctx2.fillStyle = "#ffe08a";
+        ctx2.font = "12px ui-monospace, monospace";
+        ctx2.fillText(`\u26A0 ${w.arch.alertTimer.toFixed(1)}s  +50% if flicked`, r.x + 8, r.y + r.h / 2);
         break;
       }
       default:
@@ -760,50 +1168,119 @@
         return "#c792ea";
     }
   }
-  function drawGrid(ctx, world) {
-    ctx.strokeStyle = "rgba(255,255,255,0.04)";
-    ctx.lineWidth = 1;
+  function drawFirewall(ctx2, world) {
+    const x = world.firewallX - world.firewallW / 2;
+    const bottom = world.height - GAME.taskbarH;
+    const grad = ctx2.createLinearGradient(x, 0, x + world.firewallW, 0);
+    grad.addColorStop(0, "rgba(255,90,90,0.15)");
+    grad.addColorStop(0.5, "rgba(255,120,120,0.55)");
+    grad.addColorStop(1, "rgba(255,90,90,0.15)");
+    ctx2.fillStyle = grad;
+    ctx2.fillRect(x, 0, world.firewallW, bottom);
+    ctx2.strokeStyle = "rgba(255,170,170,0.35)";
+    ctx2.lineWidth = 2;
+    for (let y = 0; y < bottom; y += 16) {
+      ctx2.beginPath();
+      ctx2.moveTo(x, y);
+      ctx2.lineTo(x + world.firewallW, y + 8);
+      ctx2.stroke();
+    }
+    ctx2.save();
+    ctx2.translate(world.firewallX, bottom - 8);
+    ctx2.rotate(-Math.PI / 2);
+    ctx2.fillStyle = "rgba(255,200,200,0.7)";
+    ctx2.font = "10px ui-monospace, monospace";
+    ctx2.fillText("FIREWALL", 0, 3);
+    ctx2.restore();
+  }
+  function drawGrid(ctx2, world) {
+    ctx2.strokeStyle = "rgba(255,255,255,0.04)";
+    ctx2.lineWidth = 1;
     for (let x = 0; x < world.width; x += 40) {
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, world.height);
-      ctx.stroke();
+      ctx2.beginPath();
+      ctx2.moveTo(x, 0);
+      ctx2.lineTo(x, world.height);
+      ctx2.stroke();
     }
     for (let y = 0; y < world.height; y += 40) {
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(world.width, y);
-      ctx.stroke();
+      ctx2.beginPath();
+      ctx2.moveTo(0, y);
+      ctx2.lineTo(world.width, y);
+      ctx2.stroke();
     }
   }
-  function drawHud(ctx, world) {
+  function drawHud(ctx2, world) {
     const a = world.agent;
-    ctx.fillStyle = "#9fb0d0";
-    ctx.font = "12px ui-monospace, monospace";
+    ctx2.fillStyle = "#9fb0d0";
+    ctx2.font = "12px ui-monospace, monospace";
     const lines = [
       `state: ${a.state.fsm}`,
       `vel:   (${a.kin.vel.x.toFixed(0)}, ${a.kin.vel.y.toFixed(0)})`,
       `ground:${a.state.grounded}  wall:${a.state.wall}`,
       `[sh] gravity+rungs  [\u266A] beat-bounce  [txt] grow/float  [ERR] close=BOOM`
     ];
-    lines.forEach((l, i) => ctx.fillText(l, 10, 16 + i * 15));
+    lines.forEach((l, i) => ctx2.fillText(l, 10, 16 + i * 15));
+  }
+  function bar(ctx2, x, y, w, h, frac, fill, label) {
+    ctx2.fillStyle = "rgba(255,255,255,0.08)";
+    ctx2.fillRect(x, y, w, h);
+    ctx2.fillStyle = fill;
+    ctx2.fillRect(x, y, w * Math.max(0, Math.min(1, frac)), h);
+    ctx2.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx2.lineWidth = 1;
+    ctx2.strokeRect(x + 0.5, y + 0.5, w, h);
+    ctx2.fillStyle = "#eaf0ff";
+    ctx2.font = "11px ui-monospace, monospace";
+    ctx2.fillText(label, x, y - 4);
+  }
+  function drawGameHud(ctx2, world, g) {
+    ctx2.fillStyle = "#eaf0ff";
+    ctx2.font = "13px system-ui, sans-serif";
+    ctx2.fillText("KERNEL RUN \u2014 deliver the packet to Backup_Drive (D:)", 10, 20);
+    const integCol = g.integrity > 60 ? "#6cff9a" : g.integrity > 30 ? "#ffd166" : "#ff6b6b";
+    bar(ctx2, 10, 40, 180, 12, g.integrity / GAME.integrityStart, integCol, `Data Integrity ${g.integrity}%`);
+    const ramFrac = g.ram / GAME.ramMax;
+    const ramCol = ramFrac < 0.75 ? "#7fd0ff" : ramFrac < 0.96 ? "#ffd166" : "#ff6b6b";
+    const leakTag = g.leakedRam > 0.5 ? ` (leak +${g.leakedRam.toFixed(0)})` : "";
+    bar(ctx2, 10, 72, 180, 12, ramFrac, ramCol, `Memory Usage ${g.ram.toFixed(0)}%${leakTag}`);
+    if (ramFrac >= GAME.ramSpawnBlock / GAME.ramMax) {
+      ctx2.fillStyle = "#ff9b9b";
+      ctx2.font = "10px ui-monospace, monospace";
+      ctx2.fillText("RAM critical \u2014 close windows (X) before GC sweep!", 10, 98);
+    }
+    ctx2.fillStyle = "#7f8db0";
+    ctx2.font = "11px ui-monospace, monospace";
+    ctx2.fillText(`delivered: ${g.wins}  resets: ${g.resets}  GC: ${g.gcSweeps}`, world.width - 210, 20);
+    if (g.messageTtl > 0 && g.message) {
+      ctx2.globalAlpha = Math.min(1, g.messageTtl * 2);
+      ctx2.fillStyle = g.phase === "WON" /* WON */ ? "#6cff9a" : "#ffd166";
+      ctx2.font = "600 22px system-ui, sans-serif";
+      const tw = ctx2.measureText(g.message).width;
+      ctx2.fillText(g.message, (world.width - tw) / 2, world.height / 2 - 40);
+      ctx2.globalAlpha = 1;
+    }
+    const sink = world.windows.find((w) => w.id === g.sinkId);
+    const a = world.agent;
+    if (sink && !overlapsDropZone(a.tf.pos.x, a.tf.pos.y, a.shape.radius, sink)) {
+      ctx2.fillStyle = "rgba(120,255,170,0.5)";
+      ctx2.font = "11px ui-monospace, monospace";
+      ctx2.fillText("\u2192 goal", sink.rect.x - 4, sink.rect.y - 8);
+    }
   }
 
   // src/main.ts
   function boot(canvas) {
-    const ctx = canvas.getContext("2d");
+    const ctx2 = canvas.getContext("2d");
     const world = new World(canvas.width, canvas.height);
-    world.spawnWindow(90, 220, 200, 150, "readme.txt", 210, "PLAIN" /* PLAIN */);
-    world.spawnWindow(330, 300, 230, 150, "bash", 150, "TERMINAL" /* TERMINAL */);
-    world.spawnWindow(600, 180, 200, 140, "player.fm", 320, "MEDIA" /* MEDIA */);
-    world.spawnWindow(150, 450, 180, 120, "notes.txt", 50, "EDITOR" /* EDITOR */);
-    world.spawnWindow(470, 470, 220, 120, "SYSTEM_FAULT", 0, "BSOD" /* BSOD */);
+    const game = makeGameState();
+    buildLevel(world, game);
     const setPos = (e) => {
       const rect = canvas.getBoundingClientRect();
       world.pointer.x = (e.clientX - rect.left) * (canvas.width / rect.width);
       world.pointer.y = (e.clientY - rect.top) * (canvas.height / rect.height);
     };
     canvas.addEventListener("pointerdown", (e) => {
+      initAudio();
       setPos(e);
       world.pointer.down = true;
       world.pointer.pressed = true;
@@ -815,6 +1292,19 @@
       world.pointer.down = false;
       world.pointer.released = true;
     });
+    canvas.addEventListener("dblclick", (e) => {
+      setPos(e);
+      const onWindow = world.topWindowAt(world.pointer.x, world.pointer.y);
+      if (onWindow) return;
+      if (!canSpawn(world, game)) return;
+      const w = 150, h = 90;
+      let sx = Math.max(0, world.pointer.x - w / 2);
+      const barL = world.firewallX - world.firewallW / 2;
+      const barR = world.firewallX + world.firewallW / 2;
+      if (world.pointer.x < world.firewallX) sx = Math.min(sx, barL - w);
+      else sx = Math.max(sx, barR);
+      world.spawnWindow(sx, Math.max(40, world.pointer.y - h / 2), w, h, "scratch.win", 265, "PLAIN" /* PLAIN */);
+    });
     let last = performance.now();
     let acc = 0;
     function frame(now) {
@@ -822,9 +1312,10 @@
       last = now;
       while (acc >= CONFIG.dt) {
         stepWorld(world, CONFIG.dt);
+        gameSystem(world, game, CONFIG.dt);
         acc -= CONFIG.dt;
       }
-      render(ctx, world);
+      render(ctx2, world, game);
       requestAnimationFrame(frame);
     }
     requestAnimationFrame(frame);

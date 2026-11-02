@@ -2,10 +2,11 @@
 //   1 InputSystem  2 WindowSystem  3 AgentIntentSystem
 //   4 KinematicsSystem  5 CollisionSystem  6 PostFsmSystem
 // (RenderSystem lives in render.ts and is not part of the fixed step.)
-import { CONFIG } from './config.js';
+import { CONFIG, GAME } from './config.js';
 import { FsmState, WindowKind } from './components.js';
 import { aabbContainsX, clamp, sweptCircleAABB } from './math.js';
 import { archetypeSystem, archetypeContact, localGravityMultiplier, terminalRungContact, bsodDismiss, } from './archetypes.js';
+import { cueLand, cueLaunch, cueSlip } from './audio.js';
 // ---------------------------------------------------------------------------
 // 1. InputSystem — translate pointer edges into window grab/close intent.
 // ---------------------------------------------------------------------------
@@ -16,7 +17,16 @@ export function inputSystem(world) {
         if (win) {
             // Close box lives at the right end of the title bar.
             const closeX = win.rect.x + win.rect.w - 20;
-            if (p.x >= closeX && p.y <= win.rect.y + win.drag.titleBarH) {
+            const onCloseBox = p.x >= closeX && p.y <= win.rect.y + win.drag.titleBarH;
+            if (onCloseBox && win.arch.protectedWin) {
+                // SPAWN / SINK are system-reserved: cannot be closed. Grab instead so
+                // the player can still reposition them.
+                win.drag.grabbed = true;
+                win.drag.grabDX = p.x - win.rect.x;
+                win.drag.grabDY = p.y - win.rect.y;
+                world.bringToFront(win);
+            }
+            else if (onCloseBox) {
                 if (win.arch.kind === WindowKind.BSOD) {
                     bsodDismiss(world, win, p.x); // explosive dismissal (§5.4)
                 }
@@ -49,6 +59,23 @@ export function windowSystem(world, dt) {
         if (w.drag.grabbed) {
             w.rect.x = p.x - w.drag.grabDX;
             w.rect.y = p.y - w.drag.grabDY;
+            // --- FIREWALL CLAMP (Part 7) ---------------------------------------
+            // A window stays on its own side of the firewall. Side is decided by the
+            // window center relative to the barrier BEFORE this frame's move, so a
+            // window can never tunnel across even on a fast drag.
+            const barL = world.firewallX - world.firewallW / 2;
+            const barR = world.firewallX + world.firewallW / 2;
+            const prevCenter = px + w.rect.w / 2;
+            if (prevCenter < world.firewallX) {
+                // left side: right edge may not cross the barrier's left face
+                if (w.rect.x + w.rect.w > barL)
+                    w.rect.x = barL - w.rect.w;
+            }
+            else {
+                // right side: left edge may not cross the barrier's right face
+                if (w.rect.x < barR)
+                    w.rect.x = barR;
+            }
         }
         // Raw per-frame delta -> CLAMP -> EMA smoothing. (Bug 2 fix.)
         // Clamping the raw delta first means a single pathological mouse jump
@@ -178,6 +205,7 @@ export function collisionSystem(world, dt) {
                         detach(world, w); // single-frame momentum transfer + airborne
                         a.state.fsm = FsmState.LAUNCHED;
                         landedOn = null;
+                        cueLaunch(); // ascending chime on auto-bounce / launch
                     }
                 }
             }
@@ -221,6 +249,22 @@ export function collisionSystem(world, dt) {
     if (s.grounded && s.groundEntity != null) {
         const gw = world.windows.find((w) => w.id === s.groundEntity);
         if (gw) {
+            // --- ANTI-FERRY INERTIAL SLIP (Part 7) ---------------------------
+            // If the carrying window is being yanked sideways fast WITHOUT an
+            // upward flick, the packet loses footing and drops straight down. This
+            // kills the "slow-drag the packet to the sink" exploit: the only way to
+            // move it horizontally is an intentional flick into free flight.
+            const upwardFlick = gw.drag.vy < -CONFIG.flickThreshold;
+            if (!upwardFlick && Math.abs(gw.drag.vx) > CONFIG.slipThreshold) {
+                s.grounded = false;
+                s.groundEntity = null;
+                a.kin.vel.x = 0; // NO inherited momentum — falls straight down
+                a.kin.vel.y = Math.max(a.kin.vel.y, 0);
+                a.state.fsm = FsmState.FALLING;
+                cueSlip();
+                s.wall = newWall;
+                return; // skip the pin this frame
+            }
             // advance local patrol
             s.localOffsetX += s.dir * CONFIG.patrolSpeed * dt;
             // clamp offset to the title-bar span; flip + leap at the edges
@@ -278,6 +322,7 @@ function attach(world, w) {
     s.groundEntity = w.id;
     if (fresh) {
         s.localOffsetX = clamp(world.agent.tf.pos.x - w.rect.x, world.agent.shape.radius, w.rect.w - world.agent.shape.radius);
+        cueLand(); // blip on a fresh landing
     }
 }
 /**
@@ -313,8 +358,14 @@ function tryLaunch(world, w) {
     const vy = w.drag.vy; // negative when the window moves up
     if (vy < -CONFIG.flickThreshold) { // fast enough upward flick
         detach(world, w); // one-shot horizontal transfer too
-        a.kin.vel.y = clamp(vy * CONFIG.restitution, -CONFIG.launchMax, 0);
+        // Temp Alert Modal grants +50% restitution if flicked BEFORE it expires.
+        let e = CONFIG.restitution;
+        if (w.arch.kind === WindowKind.ALERT && w.arch.alertTimer > 0) {
+            e *= GAME.alert.earlyRestitution;
+        }
+        a.kin.vel.y = clamp(vy * e, -CONFIG.launchMax, 0);
         a.state.fsm = FsmState.LAUNCHED;
+        cueLaunch();
     }
 }
 // ---------------------------------------------------------------------------

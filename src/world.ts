@@ -1,7 +1,7 @@
 // The World holds entities. Systems operate on it. This is the ECS "store".
 
 import { Agent, Win, FsmState, WindowKind, Archetype } from './components.js';
-import { CONFIG, ARCH } from './config.js';
+import { CONFIG, ARCH, GAME } from './config.js';
 
 export interface Pointer {
   x: number;
@@ -33,6 +33,14 @@ export function makeArchetype(kind: WindowKind, baseY: number): Archetype {
     crumble: ARCH.bsod.integrity,
     crumbleMax: ARCH.bsod.integrity,
     dismissed: false,
+    // alert (Temp Alert Modal)
+    alertTimer: GAME.alert.countdown,
+    alertMax: GAME.alert.countdown,
+    // audio-player pulse
+    pulseTimer: 0,
+    pulseUp: false,
+    // game roles
+    protectedWin: kind === WindowKind.SPAWN || kind === WindowKind.SINK,
   };
 }
 
@@ -42,11 +50,16 @@ export class World {
   pointer: Pointer = { x: 0, y: 0, down: false, pressed: false, released: false };
   width: number;
   height: number;
+  // Immovable vertical "Firewall" at mid-screen. Windows cannot cross it;
+  // airborne packets pass through freely. (Part 7, environmental partition.)
+  firewallX: number;
+  firewallW = 8;
   private nextId = 1;
 
   constructor(width: number, height: number) {
     this.width = width;
     this.height = height;
+    this.firewallX = Math.round(width * 0.5);
     this.agent = {
       id: this.alloc(),
       tf: { pos: { x: width * 0.3, y: 80 }, prev: { x: width * 0.3, y: 80 } },

@@ -1,18 +1,24 @@
 // RenderSystem — draws windows by z-order, then the agent, then the HUD.
 import { FsmState, WindowKind } from './components.js';
+import { GAME } from './config.js';
+import { GamePhase, predictFlickArc, overlapsDropZone } from './game.js';
 const KIND_TAG = {
     [WindowKind.PLAIN]: '',
     [WindowKind.TERMINAL]: ' [sh]',
     [WindowKind.MEDIA]: ' [♪]',
     [WindowKind.EDITOR]: ' [txt]',
     [WindowKind.BSOD]: ' [ERR]',
+    [WindowKind.SPAWN]: ' [SRC]',
+    [WindowKind.SINK]: ' [DST]',
+    [WindowKind.ALERT]: ' [!]',
 };
-export function render(ctx, world) {
+export function render(ctx, world, game) {
     ctx.clearRect(0, 0, world.width, world.height);
     // desktop backdrop
     ctx.fillStyle = '#0b1020';
     ctx.fillRect(0, 0, world.width, world.height);
     drawGrid(ctx, world);
+    drawFirewall(ctx, world);
     const sorted = [...world.windows].sort((a, b) => a.rect.z - b.rect.z);
     for (const w of sorted) {
         const fade = w.style.closing > 0 ? Math.max(0, 1 - w.style.closing / 0.35) : 1;
@@ -48,8 +54,24 @@ export function render(ctx, world) {
         ctx.fillText('x', r.x + r.w - 17, r.y + 18);
         ctx.globalAlpha = 1;
     }
+    // trajectory arc preview (dots) when a rapid flick is building
+    if (game) {
+        const arc = predictFlickArc(world);
+        for (let i = 0; i < arc.length; i++) {
+            const p = arc[i];
+            const t = 1 - i / arc.length;
+            ctx.globalAlpha = 0.3 + 0.5 * t;
+            ctx.fillStyle = '#ffe08a';
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+    }
     // agent (the data packet)
     const a = world.agent;
+    const dissolving = game?.phase === GamePhase.DISSOLVING;
+    ctx.globalAlpha = dissolving ? Math.max(0, game.freeze / 0.9) : 1;
     ctx.beginPath();
     ctx.arc(a.tf.pos.x, a.tf.pos.y, a.shape.radius, 0, Math.PI * 2);
     ctx.fillStyle = stateColor(a.state.fsm);
@@ -57,7 +79,35 @@ export function render(ctx, world) {
     ctx.lineWidth = 2;
     ctx.strokeStyle = '#ffffff';
     ctx.stroke();
-    drawHud(ctx, world);
+    // little packet "glyph" so it reads as data
+    ctx.fillStyle = '#0b1020';
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.fillText('0', a.tf.pos.x - 2.5, a.tf.pos.y + 3);
+    ctx.globalAlpha = 1;
+    // taskbar + kill line
+    drawTaskbar(ctx, world, game);
+    if (game)
+        drawGameHud(ctx, world, game);
+    else
+        drawHud(ctx, world);
+}
+function drawTaskbar(ctx, world, game) {
+    const h = GAME.taskbarH;
+    const y = world.height - h;
+    ctx.fillStyle = '#141b2e';
+    ctx.fillRect(0, y, world.width, h);
+    // the kill line (top of the taskbar)
+    ctx.strokeStyle = game && game.integrity <= 40 ? 'rgba(255,90,90,0.8)' : 'rgba(255,255,255,0.15)';
+    ctx.setLineDash([6, 6]);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(world.width, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#7f8db0';
+    ctx.font = '11px ui-monospace, monospace';
+    ctx.fillText('▣ taskbar — falling past this line costs Data Integrity', 10, y + 18);
 }
 function drawArchetype(ctx, w) {
     const r = w.rect;
@@ -117,6 +167,40 @@ function drawArchetype(ctx, w) {
             ctx.fillText(':( FATAL_EXCEPTION', r.x + 10, r.y + r.h / 2);
             break;
         }
+        case WindowKind.SPAWN: {
+            // emit "port" at the right edge
+            ctx.fillStyle = '#7fd0ff';
+            ctx.fillRect(r.x + r.w - 10, r.y - 6, 10, 10);
+            ctx.fillStyle = '#9fb0d0';
+            ctx.font = '11px ui-monospace, monospace';
+            ctx.fillText('↓ downloading packet...', r.x + 10, r.y + r.h / 2);
+            break;
+        }
+        case WindowKind.SINK: {
+            // active drop zone (the body), pulsing to invite delivery
+            const zy = r.y + w.drag.titleBarH;
+            const pulse = 0.12 + 0.08 * Math.abs(Math.sin(Date.now() / 300));
+            ctx.fillStyle = `rgba(120,255,170,${pulse})`;
+            ctx.fillRect(r.x, zy, r.w, r.h - w.drag.titleBarH);
+            ctx.strokeStyle = 'rgba(120,255,170,0.6)';
+            ctx.setLineDash([5, 4]);
+            ctx.strokeRect(r.x + 4, zy + 4, r.w - 8, r.h - w.drag.titleBarH - 8);
+            ctx.setLineDash([]);
+            ctx.fillStyle = '#bfffe0';
+            ctx.font = '12px ui-monospace, monospace';
+            ctx.fillText('DROP ZONE', r.x + r.w / 2 - 34, zy + (r.h - w.drag.titleBarH) / 2);
+            break;
+        }
+        case WindowKind.ALERT: {
+            // countdown ring/number — green while bonus is live, red as it expires
+            const frac = Math.max(0, w.arch.alertTimer / w.arch.alertMax);
+            ctx.fillStyle = frac > 0.3 ? '#8affc0' : '#ff6b6b';
+            ctx.fillRect(r.x, r.y + r.h - 5, r.w * frac, 5);
+            ctx.fillStyle = '#ffe08a';
+            ctx.font = '12px ui-monospace, monospace';
+            ctx.fillText(`⚠ ${w.arch.alertTimer.toFixed(1)}s  +50% if flicked`, r.x + 8, r.y + r.h / 2);
+            break;
+        }
         default: break;
     }
 }
@@ -128,6 +212,33 @@ function stateColor(s) {
         case FsmState.FALLING: return '#7aa2ff';
         case FsmState.WALL_SLIDING: return '#c792ea';
     }
+}
+function drawFirewall(ctx, world) {
+    const x = world.firewallX - world.firewallW / 2;
+    const bottom = world.height - GAME.taskbarH;
+    // hazard-striped immovable barrier from top to the taskbar
+    const grad = ctx.createLinearGradient(x, 0, x + world.firewallW, 0);
+    grad.addColorStop(0, 'rgba(255,90,90,0.15)');
+    grad.addColorStop(0.5, 'rgba(255,120,120,0.55)');
+    grad.addColorStop(1, 'rgba(255,90,90,0.15)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(x, 0, world.firewallW, bottom);
+    // diagonal hazard ticks
+    ctx.strokeStyle = 'rgba(255,170,170,0.35)';
+    ctx.lineWidth = 2;
+    for (let y = 0; y < bottom; y += 16) {
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + world.firewallW, y + 8);
+        ctx.stroke();
+    }
+    ctx.save();
+    ctx.translate(world.firewallX, bottom - 8);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillStyle = 'rgba(255,200,200,0.7)';
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.fillText('FIREWALL', 0, 3);
+    ctx.restore();
 }
 function drawGrid(ctx, world) {
     ctx.strokeStyle = 'rgba(255,255,255,0.04)';
@@ -156,5 +267,57 @@ function drawHud(ctx, world) {
         `[sh] gravity+rungs  [♪] beat-bounce  [txt] grow/float  [ERR] close=BOOM`,
     ];
     lines.forEach((l, i) => ctx.fillText(l, 10, 16 + i * 15));
+}
+function bar(ctx, x, y, w, h, frac, fill, label) {
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = fill;
+    ctx.fillRect(x, y, w * Math.max(0, Math.min(1, frac)), h);
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, w, h);
+    ctx.fillStyle = '#eaf0ff';
+    ctx.font = '11px ui-monospace, monospace';
+    ctx.fillText(label, x, y - 4);
+}
+function drawGameHud(ctx, world, g) {
+    // title
+    ctx.fillStyle = '#eaf0ff';
+    ctx.font = '13px system-ui, sans-serif';
+    ctx.fillText('KERNEL RUN — deliver the packet to Backup_Drive (D:)', 10, 20);
+    // Data Integrity bar
+    const integCol = g.integrity > 60 ? '#6cff9a' : g.integrity > 30 ? '#ffd166' : '#ff6b6b';
+    bar(ctx, 10, 40, 180, 12, g.integrity / GAME.integrityStart, integCol, `Data Integrity ${g.integrity}%`);
+    // Memory Usage (RAM) bar — leaks continuously; closing windows recovers it
+    const ramFrac = g.ram / GAME.ramMax;
+    const ramCol = ramFrac < 0.75 ? '#7fd0ff' : ramFrac < 0.96 ? '#ffd166' : '#ff6b6b';
+    const leakTag = g.leakedRam > 0.5 ? ` (leak +${g.leakedRam.toFixed(0)})` : '';
+    bar(ctx, 10, 72, 180, 12, ramFrac, ramCol, `Memory Usage ${g.ram.toFixed(0)}%${leakTag}`);
+    if (ramFrac >= GAME.ramSpawnBlock / GAME.ramMax) {
+        ctx.fillStyle = '#ff9b9b';
+        ctx.font = '10px ui-monospace, monospace';
+        ctx.fillText('RAM critical — close windows (X) before GC sweep!', 10, 98);
+    }
+    // scoreboard
+    ctx.fillStyle = '#7f8db0';
+    ctx.font = '11px ui-monospace, monospace';
+    ctx.fillText(`delivered: ${g.wins}  resets: ${g.resets}  GC: ${g.gcSweeps}`, world.width - 210, 20);
+    // transient banner
+    if (g.messageTtl > 0 && g.message) {
+        ctx.globalAlpha = Math.min(1, g.messageTtl * 2);
+        ctx.fillStyle = g.phase === GamePhase.WON ? '#6cff9a' : '#ffd166';
+        ctx.font = '600 22px system-ui, sans-serif';
+        const tw = ctx.measureText(g.message).width;
+        ctx.fillText(g.message, (world.width - tw) / 2, world.height / 2 - 40);
+        ctx.globalAlpha = 1;
+    }
+    // sink affordance hint arrow when far
+    const sink = world.windows.find((w) => w.id === g.sinkId);
+    const a = world.agent;
+    if (sink && !overlapsDropZone(a.tf.pos.x, a.tf.pos.y, a.shape.radius, sink)) {
+        ctx.fillStyle = 'rgba(120,255,170,0.5)';
+        ctx.font = '11px ui-monospace, monospace';
+        ctx.fillText('→ goal', sink.rect.x - 4, sink.rect.y - 8);
+    }
 }
 //# sourceMappingURL=render.js.map

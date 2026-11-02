@@ -559,3 +559,185 @@ All four are verified by headless tests (gravity field, beat launch, editor
 width/friction/buoyancy, BSOD decay + explosive dismiss) plus a 5000-frame
 stability pass over a mixed scene. See `src/archetypes.ts` for the
 implementation and `src/config.ts` (`ARCH`) for the tunables.
+
+---
+
+## Part 6 — "Kernel Run" Game Loop
+
+Parts 1–5 produced a stable sandbox: an autonomous packet, draggable windows,
+and local-coordinate grounding that can't be made to explode. Part 6 adds the
+*game*: an objective, a fail state, and a resource constraint that turn the
+sandbox into a playable micro-game. None of it touches the physics in
+`systems.ts` — the game is a layer that reads the world after each physics step.
+
+### 6.0 Where the game sits
+
+```
+per animation frame:
+  while (accumulator >= dt):
+     stepWorld(world, dt)       # Parts 1-5 physics (unchanged)
+     gameSystem(world, g, dt)   # Part 6: objective / fail / resource / win
+  render(ctx, world, g)         # HUD + trajectory + archetype visuals
+```
+
+`GameState` (`src/game.ts`) lives outside the ECS `World` and holds the
+objective wiring (`spawnId`, `sinkId`), `integrity`, `ram`, and a `phase`
+(`PLAYING | WON | DISSOLVING`). The game never writes to the agent's velocity
+during play except through the same reset path the physics already expects, so
+the local-coordinate fix is preserved.
+
+### 6.1 Objective & win/loss loop
+
+| Element | Window | Rule |
+|---------|--------|------|
+| Source | `Download_Manager` (SPAWN) | emits the packet from a fixed port; protected (cannot be closed, free RAM) |
+| Goal | `Backup_Drive (D:)` (SINK) | its body below the title bar is an **active drop zone**; packet overlap ⇒ WIN |
+| Fail line | taskbar (screen bottom) | packet falling below the taskbar top costs **Data Integrity** |
+
+- **Win:** `overlapsDropZone()` (AABB vs. the sink body). Triggers a short
+  celebration freeze, a win chime, then `buildLevel()` for the next run.
+- **Integrity:** starts at 100%, loses 25% per fall; the packet respawns at the
+  source each time. At **0%** the packet *dissolves* (fade-out + low thud) and
+  the level resets.
+
+### 6.2 Archetypes used as game pieces
+
+The game reuses the Part 5 archetype engine and adds two game-tuned behaviors
+plus two roles:
+
+| Role | Behavior |
+|------|----------|
+| **Terminal** | rigid, standard patrol surface — the safe landing zone |
+| **Audio Player (MEDIA)** | top edge pulses **±10px every 500ms** (square pulse off `pulseTimer`); landing on the raised half gives a reliable auto-bounce. Beat envelope kept only for the visualizer. |
+| **Temp Alert (ALERT)** | internal **5s countdown**; auto-closes at 0 (disappearing platform). Flicking it upward **before expiry** multiplies launch restitution by 1.5 (+50%). |
+| **SPAWN / SINK** | protected game windows (source / goal) |
+
+The ALERT bonus is applied in `tryLaunch` (one line, gated on
+`alertTimer > 0`), so it rides the existing clamped-flick launch — no new
+launch path, no regression risk.
+
+### 6.3 System resource constraint (RAM)
+
+`computeRam()` sums a flat per-window cost plus a per-area term over all open,
+non-protected windows:
+
+```
+ram = Σ (ramPerWindow + w*h * ramPerArea)     # protected spawn/sink excluded
+```
+
+Spawning is gated: **double-click empty desktop** creates a platform only when
+`ram < ramSpawnBlock` (96%). This forces the core resource decision — *close or
+shrink trailing windows to afford platforms ahead* — rather than letting the
+player carpet the screen. The HUD RAM bar turns amber then red as it fills.
+
+### 6.4 Game feel
+
+- **Trajectory preview:** while a window is dragged fast enough to launch
+  (`vy < −flickThreshold`), `predictFlickArc()` mirrors the exact launch math
+  (including the ALERT +50%) and integrates a ballistic arc, drawn as fading
+  dots. It is a *preview* and deliberately ignores mid-air collisions.
+- **Web Audio cues** (`src/audio.ts`): oscillator-only synths, lazily started
+  on first gesture, safely no-op without an `AudioContext`:
+  - land → soft triangle blip
+  - launch → ascending two-note sine chime
+  - integrity loss → descending saw/square alarm
+  - delivery → bright four-note triad
+  - dissolve → low saw thud
+
+### 6.5 Verification
+
+A headless suite (15 checks) covers: level build, win on sink contact,
+integrity loss on fall (100→75), dissolve at 0% then reset, RAM scaling and
+spawn-block, ALERT countdown + boosted flick (−1037 px/s vs. ~−691 unboosted),
+MEDIA ±10px pulse, and trajectory prediction. An 8000-frame run of the full
+`stepWorld + gameSystem` loop stays finite and bounded (max speed ~636 px/s),
+confirming the game layer does not regress the local-coordinate physics fix.
+
+---
+
+## Part 7 — Anti-Ferry Constraints
+
+Part 6 shipped a working game, but with a degenerate strategy: because the
+grounded packet is pinned to its window in local coordinates (Part 7 of the
+physics rewrite — the fix that stopped the runaway), a player could grab the
+window *under* the packet and slowly drag it straight to the sink, skipping all
+platforming, flicking, and RAM pressure. Part 7 closes that loophole with three
+interacting constraints that make flicking, catching, and closing mandatory.
+
+### 7.1 Anti-ferry inertial slip
+
+In the collision pin block, before the packet is pinned to its window:
+
+```
+upwardFlick = window.vy < -flickThreshold         # a real launch is in progress
+if not upwardFlick and |window.vx| > slipThreshold(120 px/s):
+    grounded   = false
+    groundEntity = null
+    vel.x = 0                 # NO inherited momentum — this is the anti-ferry
+    vel.y = max(vel.y, 0)     # begin a clean straight-down fall
+    fsm   = FALLING
+    cueSlip()                 # skid chirp
+```
+
+The packet keeps its footing only while the window moves slowly (≤120 px/s) or
+is being flicked upward. Any fast *horizontal* drag drops it straight down with
+zero horizontal velocity, so you cannot carry it sideways. The sole way to move
+the packet across distance is an intentional upward/diagonal flick
+(`tryLaunch`) into free flight — exactly the mechanic the game is about.
+
+Note the ordering: the slip check reads `window.vx`/`vy` from the **smoothed
+EMA** computed in `windowSystem` earlier the same frame, so a single jittery
+mouse frame can't false-trigger a slip.
+
+### 7.2 Firewall barrier (environmental partition)
+
+The `World` owns an immovable vertical stripe at `firewallX = 0.5·width`,
+spanning top → taskbar. Two rules, enforced in different systems:
+
+- **Windows can't cross it** (`windowSystem`). A window's side is decided by its
+  center *before* the frame's move; it is then clamped so a left-side window's
+  right edge can't pass the barrier's left face, and a right-side window's left
+  edge can't pass the right face. Because the clamp uses the pre-move center, a
+  window can never tunnel across even on a fast drag.
+- **Airborne packets pass freely.** The firewall has no packet collider at all —
+  it only constrains windows. A launched packet sails straight through.
+
+Together with the slip rule this forces the canonical play pattern: **flick the
+packet from a left-side window, through the air across the firewall, and catch
+it on a right-side window** near the sink. You physically cannot bridge the
+partition by dragging.
+
+### 7.3 Live memory leak + emergency GC
+
+RAM is now a stateful accumulator, not a snapshot:
+
+```
+openCount   = auxiliary (non-protected, non-closing) windows
+leakedRam  += ramLeakPerWindow(0.5%) · openCount · dt      # per frame
+ram         = clamp(baseRam(windows) + leakedRam, 0, 100)
+```
+
+- **Base RAM** is the per-window + per-area cost; it drops **instantly** when a
+  window is closed (it simply stops being counted), which is the player's lever
+  to reclaim memory and slow the leak.
+- **At 100%**, `emergencyGc()` fires: every auxiliary window is force-closed
+  (fade-out), the accumulated leak is reclaimed, and the packet is **dropped**
+  (grounded → false) whether it was standing or riding. Protected spawn/sink
+  survive. A harsh sweep chirp plays and a `GC` counter ticks on the HUD.
+
+The leak creates a clock: the longer windows stay open, the closer the sweep.
+Players must keep the field lean — close trailing windows after use — or lose
+their whole platform layout (and their footing) to the GC. This reinforces the
+"close windows" pillar that the static RAM cap alone did not pressure hard
+enough.
+
+### 7.4 Verification
+
+A 14-check headless suite covers all three: slow-drag keeps footing while
+fast-drag slips with zero horizontal velocity (and an upward flick still
+launches, not slips); left/right windows clamp exactly to the barrier faces
+while an airborne packet crosses; RAM leaks at the exact `0.5%·count` rate,
+closing a window recovers base RAM immediately, and a forced 100% triggers one
+GC sweep that closes all auxiliary windows, drops the packet, and spares
+spawn/sink. A 9000-frame full-loop run stays finite and bounded (max speed
+~636 px/s), confirming none of this regressed the local-coordinate physics.

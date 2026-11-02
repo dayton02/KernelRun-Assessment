@@ -11,7 +11,7 @@
 // window rect it owns, and returns a small "collision effect" describing how
 // the packet should respond. The core CollisionSystem stays generic.
 
-import { ARCH, CONFIG } from './config.js';
+import { ARCH, CONFIG, GAME } from './config.js';
 import { FsmState, Win, WindowKind } from './components.js';
 import { World } from './world.js';
 import { clamp } from './math.js';
@@ -26,6 +26,7 @@ export function archetypeSystem(world: World, dt: number): void {
       case WindowKind.MEDIA: updateMedia(w, dt); break;
       case WindowKind.EDITOR: updateEditor(world, w, dt); break;
       case WindowKind.BSOD: updateBsod(w, dt); break;
+      case WindowKind.ALERT: updateAlert(w, dt); break;
       default: break;
     }
   }
@@ -65,29 +66,49 @@ function updateTerminal(w: Win, dt: number): void {
 // The title-bar collider oscillates vertically with the track's waveform.
 // On each beat the collider snaps upward; a packet resting on it at that moment
 // gets a beat-matched launch. Timing accuracy scales the restitution.
+// Kernel Run spec: the Audio Player pulses its top edge by +/-10px every
+// 500ms — a predictable, auto-timed bouncing ledge. We drive a square pulse
+// off `pulseTimer` and ALSO keep a smooth `beatPulse` envelope purely for the
+// visualizer bars. The pulse is the collider; the beat is just decoration.
 function updateMedia(w: Win, dt: number): void {
   const m = ARCH.media;
-  const beatPeriod = 60 / w.arch.bpm;      // seconds per beat
+  const p = GAME.pulse;
+
+  // --- the ±10px/500ms square pulse that defines the collider position ---
+  w.arch.pulseTimer += dt;
+  if (w.arch.pulseTimer >= p.halfPeriod) {
+    w.arch.pulseTimer -= p.halfPeriod;
+    w.arch.pulseUp = !w.arch.pulseUp;          // toggle every 500ms
+  }
+  const pulseOffset = w.arch.pulseUp ? -p.amplitude : p.amplitude;
+
+  // --- smooth beat envelope for the visualizer only ---
+  const beatPeriod = 60 / w.arch.bpm;
   const prevPhase = w.arch.phase;
   w.arch.phase += dt;
-
-  // detect a beat crossing this frame
   const prevBeat = Math.floor(prevPhase / beatPeriod);
   const nowBeat = Math.floor(w.arch.phase / beatPeriod);
   w.arch.onBeat = nowBeat !== prevBeat;
+  const intoBeat = (w.arch.phase % beatPeriod) / beatPeriod;
+  w.arch.beatPulse = Math.pow(1 - intoBeat, 2);
 
-  // waveform: a sharp attack on the beat decaying until the next one
-  const intoBeat = (w.arch.phase % beatPeriod) / beatPeriod; // 0..1
-  w.arch.beatPulse = Math.pow(1 - intoBeat, 2);              // 1 at beat, ->0
-
-  // oscillate the collider's top edge around its rest Y
-  const offset = -m.amplitude * w.arch.beatPulse;
+  // apply the pulse to the collider's top edge around its rest Y
   if (!w.drag.grabbed) {
-    // only auto-oscillate when not being dragged, so player control wins
-    w.rect.y = w.arch.baseY + offset;
+    w.rect.y = w.arch.baseY + pulseOffset;     // auto-timed bouncing ledge
   } else {
-    // if dragged, the new resting position becomes baseY
-    w.arch.baseY = w.rect.y - offset;
+    w.arch.baseY = w.rect.y - pulseOffset;     // player drag retargets rest Y
+  }
+  void m;
+}
+
+// === 5. ALERT (Temp Alert Modal) ==========================================
+// Kernel Run spec: an internal 5s countdown before it auto-closes. Flicking it
+// upward BEFORE expiry grants +50% launch restitution (earlyRestitution). Once
+// the timer runs out it closes (disappearing platform) via the standard path.
+function updateAlert(w: Win, dt: number): void {
+  w.arch.alertTimer -= dt;
+  if (w.arch.alertTimer <= 0 && w.style.closing === 0) {
+    w.style.closing = 0.0001;   // auto-close -> fades out, platform vanishes
   }
 }
 
@@ -169,11 +190,12 @@ export function archetypeContact(world: World, w: Win, dt: number): ContactEffec
 }
 
 function mediaContact(w: Win): ContactEffect {
-  const m = ARCH.media;
-  // launch only when the collider is near a beat peak
-  if (w.arch.beatPulse > 0.6) {
-    const bonus = w.arch.onBeat ? m.onBeatBonus : m.offBeatBonus;
-    const speed = m.amplitude * m.launchGain * w.arch.beatPulse * bonus;
+  const p = GAME.pulse;
+  // Auto-timed bounce: if the packet lands while the ledge is in its UP half
+  // of the pulse (rising/raised), it gets a reliable moderate bounce. This is
+  // the "auto-timed bouncing ledge" from the Kernel Run spec — no flick needed.
+  if (w.arch.pulseUp) {
+    const speed = CONFIG.edgeJumpImpulse * p.bounceBonus;
     return { launchVy: -clamp(speed, 0, CONFIG.launchMax), forceLaunch: true };
   }
   return {};

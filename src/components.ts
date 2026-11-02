@@ -53,6 +53,10 @@ export enum WindowKind {
   MEDIA = 'MEDIA',             // beat-matched oscillating trampoline
   EDITOR = 'EDITOR',           // player-grown surface: width/friction/buoyancy
   BSOD = 'BSOD',               // timed crumbling platform, explosive dismiss
+  // --- Kernel Run game roles ---
+  SPAWN = 'SPAWN',             // "Download_Manager": emits the packet from a port
+  SINK = 'SINK',               // "Backup_Drive (D:)": the goal drop zone
+  ALERT = 'ALERT',             // "Temp Alert": 5s countdown, +50% restitution if early
 }
 
 /** A horizontal "rung" emitted by a Terminal's command output. */
@@ -82,6 +86,17 @@ export interface Archetype {
   crumble: number;             // seconds of integrity remaining (counts down)
   crumbleMax: number;          // starting integrity
   dismissed: boolean;          // set when the player force-closes it
+
+  // ALERT (Temp Alert Modal) --------------------------------------------
+  alertTimer: number;          // seconds until auto-close
+  alertMax: number;            // starting countdown
+
+  // AUDIO PLAYER pulse (Kernel Run spec: +/-10px every 500ms) -----------
+  pulseTimer: number;          // phase within the pulse cycle
+  pulseUp: boolean;            // current half of the square pulse
+
+  // Game roles ----------------------------------------------------------
+  protectedWin: boolean;       // SPAWN/SINK: cannot be closed/consumed by RAM
 }
 
 /** A window entity bundles all of these. */
