@@ -13,14 +13,17 @@ Full design rationale, ECS layout, state tables, and the physics math are in
 
 - **Objective:** move the packet from **Download_Manager** (source) to the
   **Backup_Drive (D:)** drop zone (goal). The source is a **launcher**: it holds
-  the packet briefly (watch the charge bar), then **auto-ejects it in an arc
-  toward the goal side** — so you catch and relay it onward rather than coax it
-  off a fixed window. The goal is **immovable** and **relocates to a random
-  right-side edge after every delivery**. Platforms and Data Integrity carry
-  over between deliveries.
+  the packet briefly (watch the charge bar), then **auto-ejects it in a
+  randomized arc toward the goal side** — so you catch and relay it onward
+  rather than coax it off a fixed window. **The source, the goal, and the three
+  starter platforms all spawn at random positions** each new level (source left,
+  goal right, starters a random mix of platform types across both sides), so
+  every run is a fresh layout. The source and goal also **relocate after every
+  delivery**. Platforms and Data Integrity carry over between deliveries.
 - **Data Integrity (starts 100%):** every time the packet falls past the
-  **taskbar** at the bottom, you lose 25%. At 0% the packet dissolves and
-  restarts at the source.
+  **taskbar** at the bottom, you lose 25% and the packet respawns at the source.
+  At **0% it's GAME OVER** — a *SYSTEM CRASH* screen shows your packets-delivered
+  score and best, and a click starts a fresh run (best score carries over).
 - **Memory Usage (RAM):** every open window (except the protected source/sink)
   costs RAM **and leaks more every second**. **Double-click empty desktop** to
   spawn a platform — but only if the RAM bar has room. Closing a window (its
@@ -40,10 +43,11 @@ Full design rationale, ECS layout, state tables, and the physics math are in
 
 ## Controls & flow (Part 8)
 
-- **Click a window** (quick tap) the packet is resting on, or press **Space**
-  while hovering it — a deterministic **Spring Pop** launches the packet
-  straight up. No violent drag needed. (Clicking a window the packet isn't on
-  just bumps it — nothing launches.)
+- **Click anywhere to start** — the game is paused on a title overlay until the
+  first click (which also enables sound).
+- **Flick a window upward** (drag it up fast) to launch the packet off it — this
+  is the only way to make the packet jump. A dotted trajectory arc previews the
+  shot while you wind up.
 - **Scroll the mouse wheel** to choose which platform the next spawn makes
   (scratch / terminal / media / notes / alert), then **double-click empty
   desktop** to place it. This is how you bring the special platforms back after
@@ -52,8 +56,12 @@ Full design rationale, ECS layout, state tables, and the physics math are in
   trajectory arc previews the launch).
 - **Catch cone:** a falling packet gently snaps toward a title bar it's about to
   land on, so good positioning catches it — no pixel-perfect aiming.
-- **Drag on empty wallpaper** to draw a blue **marquee net**; its top edge
-  bounces a falling packet (a clutch save). Costs 15% RAM while held.
+- **Drag on empty wallpaper** to draw a blue **marquee net** — a soft clutch
+  save with a limited number of catches (shown as ●/○), not a trampoline. It
+  gives a gentle, capped upward nudge then is spent and vanishes; costs 25% RAM
+  while held, so it competes with your platforms.
+- **The goal (Backup_Drive) is a drop zone, not a platform** — fly or drop the
+  packet straight into its green body to deliver. You can't stand on it.
 - **Leapfrog auto-recycle:** the window you just launched *from* dissolves on its
   own once the packet lands elsewhere — refunding RAM and building a combo. No
   hunting for `[X]` buttons.
@@ -78,9 +86,17 @@ Full design rationale, ECS layout, state tables, and the physics math are in
   source/sink can't be closed.
 
 Audio cues: blip on landing, ascending chime on launch, alarm on integrity loss,
-triad on delivery. Click once to enable audio (browser gesture requirement).
+triad on delivery. A looping chiptune plays underneath, kept quiet so it never
+masks the effects. Click once to enable audio (browser gesture requirement);
+press **M** to mute the music.
 
 The HUD shows Data Integrity, Memory Usage, the live FSM state, and score.
+
+## Credits
+
+- Music: *Tip C - Quirky 8-Bit Chiptune Instrumental* by **NickPanek**, from
+  [pixabay.com](https://pixabay.com). Looped at low volume; press **M** to mute.
+- Sound effects: synthesized in-engine via the Web Audio API (`src/audio.ts`).
 
 ## Window archetypes (Part 5)
 

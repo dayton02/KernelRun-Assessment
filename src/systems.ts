@@ -11,7 +11,7 @@ import {
   archetypeSystem, archetypeContact, localGravityMultiplier,
   terminalRungContact, bsodDismiss, ContactEffect,
 } from './archetypes.js';
-import { cueLand, cueLaunch, cueSlip, cueSpring, cueNet } from './audio.js';
+import { cueLand, cueLaunch, cueSlip, cueNet } from './audio.js';
 
 // Hook the game layer reads to drive leapfrog auto-recycle: the id of the
 // window the packet most recently LAUNCHED from, and whether it has since
@@ -59,15 +59,6 @@ export function inputSystem(world: World): void {
     for (const w of world.windows) w.drag.grabbed = false;
   }
 
-  // Click-to-Spring intent (Part 8): resolved INSIDE the fixed step so it is
-  // synchronized with the packet's grounded state. A plain click or Spacebar
-  // sets world.springRequest; we pop the targeted window here.
-  if (world.springRequest.pending) {
-    world.springRequest.pending = false;
-    const sr = world.springRequest;
-    const win = world.topWindowAt(sr.x, sr.y);
-    if (win) springPopWindow(world, win);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -112,10 +103,6 @@ export function windowSystem(world: World, dt: number): void {
     w.drag.vy = a * rawVy + (1 - a) * w.drag.vy;
 
     w.prev.x = px; w.prev.y = py; w.prev.w = w.rect.w; w.prev.h = w.rect.h;
-
-    // per-window Part 8 timers
-    if (w.drag.springCooldown > 0) w.drag.springCooldown -= dt;
-    if (w.drag.springPop > 0) w.drag.springPop -= dt;
 
     // disappearing platform: fade then despawn
     if (w.style.closing > 0) w.style.closing += dt;
@@ -206,6 +193,11 @@ export function collisionSystem(world: World, dt: number): void {
 
   for (const w of sorted) {
     if (w.style.closing > 0) continue;
+    // The SINK (Backup_Drive) is a GOAL, not a platform: it is fully non-solid
+    // so the packet flies straight into its drop-zone body (the win is detected
+    // in gameSystem). Skipping it here means no title-bar landing and no wall
+    // contact on the goal — you deliver INTO it, you don't clip up through it.
+    if (w.arch.kind === WindowKind.SINK) continue;
     const rect = w.rect;
 
     // --- Terminal text rungs: thin one-way sub-platforms (§5.1) ---
@@ -262,6 +254,7 @@ export function collisionSystem(world: World, dt: number): void {
           if (fx.forceLaunch) {
             detach(world, w);        // single-frame momentum transfer + airborne
             a.state.fsm = FsmState.LAUNCHED;
+            s.deliverable = true;    // real launch -> may deliver to the goal
             landedOn = null;
             cueLaunch();             // ascending chime on auto-bounce / launch
           }
@@ -309,13 +302,14 @@ export function collisionSystem(world: World, dt: number): void {
     const gw = world.windows.find((w) => w.id === s.groundEntity);
     if (gw) {
       // --- ELASTIC ANTI-FERRY SLIP (Part 8, replaces instant slip) ------
-      // A fast horizontal drag no longer detaches instantly (that felt like an
-      // invisible tripwire). Instead the packet WOBBLES for a grace window
-      // (telegraphed with a yellow alert + oscillating rotation in render).
-      // Only if the over-speed drag persists past the wobble WITHOUT an upward
-      // launch does the packet finally slip off and fall straight down.
+      // The packet loses footing if the carrying window is dragged fast in ANY
+      // direction (horizontal OR vertical/diagonal) — not just sideways — so
+      // you can't ferry it by slow-lifting it up to the goal either. The only
+      // exempt motion is a genuine fast UPWARD flick (that intentionally
+      // launches the packet). A WOBBLE grace window telegraphs the slip first.
       const upwardFlick = gw.drag.vy < -CONFIG.flickThreshold;
-      const overSpeed = !upwardFlick && Math.abs(gw.drag.vx) > CONFIG.slipThreshold;
+      const dragSpeed = Math.hypot(gw.drag.vx, gw.drag.vy);
+      const overSpeed = !upwardFlick && dragSpeed > CONFIG.slipThreshold;
       if (overSpeed) {
         if (s.wobble <= 0) s.wobble = FLOW.slip.wobbleTime; // start telegraph
         s.wobble -= dt;
@@ -357,6 +351,7 @@ export function collisionSystem(world: World, dt: number): void {
           a.kin.vel.x = toCenter * s.ejectVx;   // randomized magnitude
           a.kin.vel.y = s.ejectVy;              // randomized height
           a.state.fsm = FsmState.LAUNCHED;
+          s.deliverable = true;                 // ejected -> may deliver
           cueLaunch();
           s.wall = newWall;
           return;                      // ejected: skip the pin this frame
@@ -387,6 +382,14 @@ export function collisionSystem(world: World, dt: number): void {
       }
     }
   }
+
+  // --- SOLID-BODY DE-PENETRATION (anti-clip) ---------------------------
+  // The title bar is a one-way surface, but a window dragged sideways or down
+  // onto the packet could otherwise swallow it. Push the packet out of any
+  // window body it overlaps along the shallowest axis so it can never end up
+  // INSIDE a window. We skip the window it's currently grounded on (that top
+  // edge is a legitimate contact) and closing/non-solid windows.
+  depenetrate(world, landedOn);
 
   // --- floor / walls of the viewport keep the packet on screen for the demo
   const floor = world.height - 4;
@@ -429,6 +432,7 @@ function attach(world: World, w: Win): void {
       w.rect.w - world.agent.shape.radius,
     );
     s.wobble = 0;       // a clean landing steadies the packet
+    s.deliverable = false; // landed on a window -> no longer a live delivery
     cueLand();          // blip on a fresh landing
     // Leapfrog recycle: landing on a DIFFERENT window than we launched from
     // means the previous platform can be decommissioned by the game layer.
@@ -475,6 +479,7 @@ function edgeLeap(world: World, w: Win): void {
   detach(world, w);                                  // single momentum transfer
   a.kin.vel.y = -CONFIG.edgeJumpImpulse;
   a.state.fsm = FsmState.JUMPING;
+  a.state.deliverable = false;   // a patrol edge-hop is NOT a valid delivery
 }
 
 /**
@@ -509,31 +514,48 @@ function nearestCatchCone(world: World): number {
 }
 
 /**
- * Click-to-Spring (Part 8): deterministically pop a window, launching a packet
- * that is resting on it straight up — no violent mouse drag required. Returns
- * true if the pop fired (used for audio/feedback by the caller).
+ * Push the packet out of any solid window body it overlaps (anti-clip). Resolves
+ * along the minimum-penetration axis. The window the packet is grounded on is
+ * skipped (standing on its top edge is valid). If the shallowest exit is
+ * upward and the packet was falling, it lands on top; a sideways exit zeroes
+ * horizontal velocity; a downward exit lets it keep falling below the window.
  */
-export function springPopWindow(world: World, w: Win): boolean {
-  if (w.arch.protectedWin || w.style.closing > 0) return false;
-  if (w.drag.springCooldown > 0) return false;
-  w.drag.springCooldown = FLOW.spring.cooldown;
-  w.drag.springPop = 0.18;                 // visual up-nudge duration
-
-  w.drag.grabbed = false;                  // a spring pop releases any grab
-
+function depenetrate(world: World, grounded: Win | null): void {
   const a = world.agent;
-  const s = a.state;
-  // Only launches the packet if it is currently grounded on THIS window.
-  if (s.grounded && s.groundEntity === w.id) {
-    detach(world, w);
-    a.kin.vel.y = -FLOW.spring.impulse;
-    a.kin.vel.x = s.dir * CONFIG.patrolSpeed; // gentle directional bias, clamped already
-    s.fsm = FsmState.LAUNCHED;
-    cueSpring();
-    return true;
+  const r = a.shape.radius;
+  for (const w of world.windows) {
+    if (w.style.closing > 0) continue;
+    if (w.arch.kind === WindowKind.SINK) continue; // goal is non-solid (fly into it)
+    if (grounded && w.id === grounded.id) continue;
+    const rc = w.rect;
+    // circle-vs-expanded-AABB overlap test (treat the window body as solid)
+    const cx = a.tf.pos.x, cy = a.tf.pos.y;
+    const left = rc.x, right = rc.x + rc.w, top = rc.y, bottom = rc.y + rc.h;
+    if (cx + r <= left || cx - r >= right || cy + r <= top || cy - r >= bottom) continue;
+
+    // penetration depth on each side; resolve along the smallest
+    const penL = (cx + r) - left;     // push left  (out the left face)
+    const penR = right - (cx - r);    // push right (out the right face)
+    const penT = (cy + r) - top;      // push up    (out the top face)
+    const penB = bottom - (cy - r);   // push down  (out the bottom face)
+    const minPen = Math.min(penL, penR, penT, penB);
+
+    if (minPen === penT) {
+      // snap on top — becomes a landing if descending
+      a.tf.pos.y = top - r;
+      if (a.kin.vel.y > 0) a.kin.vel.y = 0;
+      if (!grounded && a.kin.vel.y <= 0.001) attach(world, w);
+    } else if (minPen === penB) {
+      a.tf.pos.y = bottom + r;
+      if (a.kin.vel.y < 0) a.kin.vel.y = 0;   // hit underside, stop upward
+    } else if (minPen === penL) {
+      a.tf.pos.x = left - r;
+      a.kin.vel.x = 0;
+    } else {
+      a.tf.pos.x = right + r;
+      a.kin.vel.x = 0;
+    }
   }
-  cueSpring();                             // still "boings" as a bumper
-  return false;
 }
 
 /**
@@ -558,11 +580,18 @@ export function marqueeNet(world: World): boolean {
   const crossed = feetPrev <= topPrev && feetNow >= topPrev;
   const overlapX = a.tf.pos.x + r > b.x && a.tf.pos.x - r < b.x + b.w;
   if (crossed && overlapX) {
+    if (m.charges <= 0) return false;      // net is spent — no more catches
     a.tf.pos.y = topPrev - r;
-    const bounce = Math.min(-a.kin.vel.y * FLOW.marquee.restitution, FLOW.marquee.minBounceVy);
-    a.kin.vel.y = bounce;                  // elastic up-bounce (clamped to a min pop)
-    s.fsm = FsmState.LAUNCHED;
-    m.cool = 0.25;                         // one bounce per arc
+    // soft, lossy, CAPPED bounce: enough to save the packet, never to launch it.
+    const raw = -a.kin.vel.y * FLOW.marquee.restitution;
+    const bounce = Math.max(FLOW.marquee.maxBounceVy,            // cap magnitude (more negative = faster up)
+                            Math.min(FLOW.marquee.minBounceVy, raw)); // ensure a minimum gentle pop
+    a.kin.vel.y = bounce;
+    s.fsm = FsmState.FALLING;              // a save, not a LAUNCHED springboard
+    s.deliverable = true;                  // bounced through the air -> may deliver
+    m.cool = 0.3;                          // one bounce per arc
+    m.charges -= 1;                        // consume a charge
+    if (m.charges <= 0) m.active = false;  // spent nets vanish
     cueNet();
     return true;
   }
@@ -587,6 +616,7 @@ function tryLaunch(world: World, w: Win): void {
     }
     a.kin.vel.y = clamp(vy * e, -CONFIG.launchMax, 0);
     a.state.fsm = FsmState.LAUNCHED;
+    a.state.deliverable = true;   // flick launch -> may deliver to the goal
     cueLaunch();
   }
 }

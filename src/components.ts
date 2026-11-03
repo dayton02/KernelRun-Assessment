@@ -37,6 +37,11 @@ export interface AgentState {
   // thus the landing spot) varies between launches. 0 = not yet rolled.
   ejectVx: number;
   ejectVy: number;
+  // True only while the packet is airborne FROM A REAL LAUNCH (flick, source
+  // eject, trampoline/net bounce) — NOT from an idle patrol edge-hop. The goal
+  // only accepts a delivery while this is true, so you can't score by riding a
+  // window into the zone and waiting for a free edge-leap.
+  deliverable: boolean;
 }
 
 // --- Window (a platform) ---

@@ -155,12 +155,17 @@ export const FLOW = {
   },
 
   // 2. Marquee Net: drag on empty wallpaper to draw a selection box; its top
-  //    edge is an elastic trampoline. Costs RAM while held.
+  //    edge is a SOFT safety net — a clutch save, not a trampoline floor. It
+  //    catches the packet a limited number of times, then is spent and must be
+  //    redrawn (which re-pays the RAM cost), so it can't be used as a permanent
+  //    bouncy floor.
   marquee: {
-    ramCost: 15,             // % RAM consumed while a marquee is held
-    restitution: 0.9,        // elastic bounce factor off the top border
-    minBounceVy: -620,       // guarantee at least this much upward pop
-    minSize: 24,             // px: ignore accidental tiny marquees
+    ramCost: 25,             // % RAM consumed while a marquee is held (steep)
+    restitution: 0.45,       // soft, lossy bounce (saves, doesn't launch)
+    maxBounceVy: -520,       // CAP the upward pop (no rocket launches)
+    minBounceVy: -240,       // gentle guaranteed nudge so it always "saves"
+    charges: 2,              // catches before the net is spent
+    minSize: 40,             // px: ignore small marquees (must commit to a real net)
   },
 
   // 3. Leapfrog Auto-Recycle: the window a packet LAUNCHED from decommissions

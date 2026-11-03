@@ -6,38 +6,60 @@ import { CONFIG, FLOW } from './config.js';
 import { World } from './world.js';
 import { stepWorld } from './systems.js';
 import { render } from './render.js';
-import { makeGameState, buildLevel, gameSystem, canSpawn, SPAWNABLE_KINDS, spawnableLabel, hueFor } from './game.js';
-import { initAudio } from './audio.js';
+import { makeGameState, buildLevel, gameSystem, canSpawn, restartGame, GamePhase, SPAWNABLE_KINDS, spawnableLabel, hueFor } from './game.js';
+import { initAudio, setMusicEnabled } from './audio.js';
 
 export function boot(canvas: HTMLCanvasElement): void {
   const ctx = canvas.getContext('2d')!;
-  const world = new World(canvas.width, canvas.height);
+
+  // Size the canvas to its DISPLAYED area at device-pixel resolution so it is
+  // crisp (not a small 820x620 buffer stretched by CSS), and give the World
+  // that full logical size for a bigger play space. Game coordinates are in CSS
+  // pixels; the backing store is CSS size x devicePixelRatio.
+  const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+  const rect0 = canvas.getBoundingClientRect();
+  const cssW = Math.max(640, Math.round(rect0.width || 820));
+  const cssH = Math.max(480, Math.round(rect0.height || 620));
+  canvas.width = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssH * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);   // draw in CSS-pixel units
+
+  const world = new World(cssW, cssH);
   const game = makeGameState();
   buildLevel(world, game);   // spawn + sink + starter platforms
 
-  // pointer wiring
+  // The game is PAUSED until the player clicks to start. The loop still renders
+  // (so the title layout + a dimmed board show through) but does not step the
+  // simulation, so the packet doesn't move before the player is ready.
+  let started = false;
+
+  // pointer wiring: map client coords -> CSS-pixel world coords
   const setPos = (e: { clientX: number; clientY: number }) => {
     const rect = canvas.getBoundingClientRect();
-    world.pointer.x = (e.clientX - rect.left) * (canvas.width / rect.width);
-    world.pointer.y = (e.clientY - rect.top) * (canvas.height / rect.height);
+    world.pointer.x = (e.clientX - rect.left) * (world.width / rect.width);
+    world.pointer.y = (e.clientY - rect.top) * (world.height / rect.height);
   };
-  // Press bookkeeping to tell a quick CLICK (spring-pop) from a DRAG, and to
-  // start a marquee when the press lands on empty wallpaper.
-  let pressT = 0, pressX = 0, pressY = 0, pressWin = false, marqueeStarted = false;
+  let marqueeStarted = false;
 
   canvas.addEventListener('pointerdown', (e) => {
     initAudio();                       // browsers require a gesture to start audio
-    setPos(e); world.pointer.down = true; world.pointer.pressed = true;
+    setPos(e);
+    // First click starts the game (and nothing else that frame).
+    if (!started) { started = true; return; }
+    // A click on the GAME OVER screen restarts a fresh run.
+    if (game.phase === GamePhase.GAME_OVER) { restartGame(world, game); return; }
+    world.pointer.down = true; world.pointer.pressed = true;
     canvas.setPointerCapture(e.pointerId);
-    pressT = performance.now(); pressX = world.pointer.x; pressY = world.pointer.y;
     const hit = world.topWindowAt(world.pointer.x, world.pointer.y);
-    pressWin = !!hit;
     marqueeStarted = false;
-    // press on empty wallpaper starts a marquee net (recovery tool)
+    // press on empty wallpaper starts a marquee net (recovery tool). It gets a
+    // limited number of catches and is consumed as it saves the packet.
     if (!hit) {
       world.marquee.active = true;
       world.marquee.x0 = world.pointer.x; world.marquee.y0 = world.pointer.y;
       world.marquee.x1 = world.pointer.x; world.marquee.y1 = world.pointer.y;
+      world.marquee.charges = FLOW.marquee.charges;
+      world.marquee.cool = 0;
       marqueeStarted = true;
     }
   });
@@ -49,28 +71,17 @@ export function boot(canvas: HTMLCanvasElement): void {
   });
   canvas.addEventListener('pointerup', (e) => {
     setPos(e); world.pointer.down = false; world.pointer.released = true;
-    const dt = performance.now() - pressT;
-    const moved = Math.hypot(world.pointer.x - pressX, world.pointer.y - pressY);
-    // Click-to-Spring: a quick, near-stationary click on a window requests a
-    // spring pop. We do NOT call springPopWindow here (that raced the physics
-    // loop); instead we set an intent the InputSystem resolves in-step.
-    if (pressWin && dt <= FLOW.spring.clickMaxMs && moved <= FLOW.spring.clickMaxMove) {
-      world.springRequest.pending = true;
-      world.springRequest.x = pressX;
-      world.springRequest.y = pressY;
-    }
     // release the marquee (it is a transient clutch tool, not a permanent floor)
     world.marquee.active = false;
     marqueeStarted = false;
   });
 
-  // Spacebar also requests a spring pop on the window under the cursor.
+  // 'M' toggles the background music without affecting the sound effects.
+  let musicOn = true;
   window.addEventListener('keydown', (e) => {
-    if (e.code === 'Space') {
-      e.preventDefault();
-      world.springRequest.pending = true;
-      world.springRequest.x = world.pointer.x;
-      world.springRequest.y = world.pointer.y;
+    if (e.code === 'KeyM') {
+      musicOn = !musicOn;
+      setMusicEnabled(musicOn);
     }
   });
 
@@ -98,18 +109,23 @@ export function boot(canvas: HTMLCanvasElement): void {
     world.spawnWindow(sx, Math.max(40, world.pointer.y - h / 2), w, h, spawnableLabel(kind), hueFor(kind), kind);
   });
 
-  // fixed-step accumulator
+  // fixed-step accumulator — only steps the sim once the game has started.
   let last = performance.now();
   let acc = 0;
   function frame(now: number): void {
-    acc += Math.min(0.1, (now - last) / 1000); // clamp long stalls
+    const elapsed = Math.min(0.1, (now - last) / 1000); // clamp long stalls
     last = now;
-    while (acc >= CONFIG.dt) {
-      stepWorld(world, CONFIG.dt);     // physics (unchanged, stable)
-      gameSystem(world, game, CONFIG.dt); // game loop AFTER physics
-      acc -= CONFIG.dt;
+    if (started) {
+      acc += elapsed;
+      while (acc >= CONFIG.dt) {
+        stepWorld(world, CONFIG.dt);     // physics (unchanged, stable)
+        gameSystem(world, game, CONFIG.dt); // game loop AFTER physics
+        acc -= CONFIG.dt;
+      }
+    } else {
+      acc = 0;                           // don't accumulate time while paused
     }
-    render(ctx, world, game);
+    render(ctx, world, game, started);   // render passes the started flag for the overlay
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);

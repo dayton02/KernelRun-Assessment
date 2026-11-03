@@ -17,6 +17,7 @@ export interface Marquee {
   x0: number; y0: number; // anchor (press point)
   x1: number; y1: number; // current drag point
   cool: number;           // short re-bounce cooldown so one net pops once/arc
+  charges: number;        // catches left before the net is spent (-1 = fresh)
 }
 
 export function marqueeBounds(m: Marquee): { x: number; y: number; w: number; h: number } {
@@ -70,7 +71,7 @@ export class World {
   firewallW = 8;
   // Emergency Marquee Net (Part 8): a selection box the player drags on empty
   // wallpaper. Its top edge is an elastic trampoline; costs RAM while held.
-  marquee: Marquee = { active: false, x0: 0, y0: 0, x1: 0, y1: 0, cool: 0 };
+  marquee: Marquee = { active: false, x0: 0, y0: 0, x1: 0, y1: 0, cool: 0, charges: 0 };
   // Spring-pop intent (Part 8): DOM input (click or Space) sets this; the
   // InputSystem consumes it INSIDE the fixed step so it stays in sync with the
   // physics (no event-loop race). Holds the target point to resolve a window.
@@ -98,6 +99,7 @@ export class World {
         wobble: 0,
         ejectVx: 0,
         ejectVy: 0,
+        deliverable: false,
       },
     };
   }

@@ -1,6 +1,6 @@
 // RenderSystem — draws windows by z-order, then the agent, then the HUD.
 import { FsmState, WindowKind } from './components.js';
-import { GAME } from './config.js';
+import { GAME, FLOW } from './config.js';
 import { GamePhase, predictFlickArc, overlapsDropZone, SPAWNABLE_KINDS, spawnableLabel } from './game.js';
 const KIND_TAG = {
     [WindowKind.PLAIN]: '',
@@ -12,7 +12,7 @@ const KIND_TAG = {
     [WindowKind.SINK]: ' [DST]',
     [WindowKind.ALERT]: ' [!]',
 };
-export function render(ctx, world, game) {
+export function render(ctx, world, game, started = true) {
     ctx.clearRect(0, 0, world.width, world.height);
     // --- screen shake (Part 8): offset the whole scene on a delivery ---
     ctx.save();
@@ -124,10 +124,67 @@ export function render(ctx, world, game) {
     // taskbar + kill line
     drawTaskbar(ctx, world, game);
     ctx.restore(); // end screen-shake transform
+    // red damage-flash when the packet drops past the taskbar (fades quickly)
+    if (game && game.flash > 0) {
+        ctx.fillStyle = `rgba(255,60,60,${0.35 * game.flash})`;
+        ctx.fillRect(0, 0, world.width, world.height);
+        // a bright edge vignette on the taskbar line to point at where it fell
+        ctx.fillStyle = `rgba(255,90,90,${0.5 * game.flash})`;
+        ctx.fillRect(0, world.height - GAME.taskbarH - 4, world.width, 4);
+    }
     if (game)
         drawGameHud(ctx, world, game);
     else
         drawHud(ctx, world);
+    // "Click to start" overlay — dims the board and prompts before play begins.
+    if (!started) {
+        ctx.fillStyle = 'rgba(6,9,18,0.72)';
+        ctx.fillRect(0, 0, world.width, world.height);
+        ctx.textAlign = 'center';
+        ctx.fillStyle = '#eaf0ff';
+        ctx.font = '700 34px system-ui, sans-serif';
+        ctx.fillText('KERNEL RUN', world.width / 2, world.height / 2 - 24);
+        ctx.fillStyle = '#ffd166';
+        ctx.font = '600 18px system-ui, sans-serif';
+        const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 350);
+        ctx.globalAlpha = 0.6 + 0.4 * pulse;
+        ctx.fillText('▶ Click anywhere to start playing', world.width / 2, world.height / 2 + 14);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = '#9fb0d0';
+        ctx.font = '13px system-ui, sans-serif';
+        ctx.fillText('Flick a window upward to launch the packet across the Firewall', world.width / 2, world.height / 2 + 44);
+        ctx.textAlign = 'left';
+    }
+    // GAME OVER overlay — integrity hit 0. Shows the run's score + best, prompts
+    // for a restart click.
+    if (game && game.phase === GamePhase.GAME_OVER) {
+        ctx.fillStyle = 'rgba(30,6,10,0.78)';
+        ctx.fillRect(0, 0, world.width, world.height);
+        ctx.textAlign = 'center';
+        const cx = world.width / 2, cy = world.height / 2;
+        ctx.fillStyle = '#ff6b6b';
+        ctx.font = '800 40px system-ui, sans-serif';
+        ctx.fillText('SYSTEM CRASH', cx, cy - 46);
+        ctx.fillStyle = '#ffd166';
+        ctx.font = '600 16px ui-monospace, monospace';
+        ctx.fillText('DATA INTEGRITY 0% — packet lost', cx, cy - 16);
+        ctx.fillStyle = '#eaf0ff';
+        ctx.font = '700 22px system-ui, sans-serif';
+        ctx.fillText(`Packets delivered: ${game.wins}`, cx, cy + 22);
+        ctx.fillStyle = game.wins >= game.best && game.wins > 0 ? '#6cff9a' : '#9fb0d0';
+        ctx.font = '15px system-ui, sans-serif';
+        const bestLine = (game.wins >= game.best && game.wins > 0)
+            ? `★ NEW BEST: ${game.best}`
+            : `Best: ${game.best}`;
+        ctx.fillText(bestLine, cx, cy + 48);
+        ctx.fillStyle = '#ffd166';
+        ctx.font = '600 16px system-ui, sans-serif';
+        const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 350);
+        ctx.globalAlpha = 0.55 + 0.45 * pulse;
+        ctx.fillText('▶ Click to run again', cx, cy + 84);
+        ctx.globalAlpha = 1;
+        ctx.textAlign = 'left';
+    }
 }
 function drawMarquee(ctx, world) {
     const m = world.marquee;
@@ -141,13 +198,18 @@ function drawMarquee(ctx, world) {
     ctx.strokeStyle = 'rgba(130,180,255,0.9)';
     ctx.lineWidth = 1;
     ctx.strokeRect(x + 0.5, y + 0.5, w, h);
-    // highlight the TOP edge — the elastic trampoline surface
+    // highlight the TOP edge — the soft safety-net surface
     ctx.strokeStyle = '#8fd0ff';
     ctx.lineWidth = 3;
     ctx.beginPath();
     ctx.moveTo(x, y);
     ctx.lineTo(x + w, y);
     ctx.stroke();
+    // remaining charges — makes the limited-use nature legible
+    ctx.fillStyle = '#bcd6ff';
+    ctx.font = '11px ui-monospace, monospace';
+    const max = FLOW.marquee.charges;
+    ctx.fillText(`net: ${'●'.repeat(Math.max(0, m.charges))}${'○'.repeat(Math.max(0, max - m.charges))}`, x + 2, y - 4);
 }
 function drawTaskbar(ctx, world, game) {
     const h = GAME.taskbarH;
@@ -377,8 +439,8 @@ function drawGameHud(ctx, world, g) {
     ctx.fillStyle = '#cfd8ec';
     ctx.font = '11px ui-monospace, monospace';
     ctx.fillText(`spawn ▸ ${spawnableLabel(nextKind)}  (wheel to change, dbl-click to place)`, 10, world.height - GAME.taskbarH - 10);
-    // transient banner
-    if (g.messageTtl > 0 && g.message) {
+    // transient banner (suppressed during GAME OVER — the overlay owns the text)
+    if (g.messageTtl > 0 && g.message && g.phase !== GamePhase.GAME_OVER) {
         ctx.globalAlpha = Math.min(1, g.messageTtl * 2);
         ctx.fillStyle = g.phase === GamePhase.WON ? '#6cff9a' : '#ffd166';
         ctx.font = '600 22px system-ui, sans-serif';

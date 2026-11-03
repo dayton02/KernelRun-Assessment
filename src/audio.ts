@@ -11,6 +11,14 @@ let ctx: Ctx | null = null;
 let master: GainNode | null = null;
 let enabled = true;
 
+// Background music ("Tip C - Quirky 8-Bit Chiptune Instrumental" by NickPanek,
+// via pixabay.com). Played as a looping <audio> element kept at a LOW volume so
+// it sits clearly under the oscillator sound effects (effects master = 0.18).
+const MUSIC_SRC = './music/nickpanek-tip-c-quirky-8-bit-chiptune-instrumental-358658.mp3';
+const MUSIC_VOLUME = 0.17;             // present but still under the effects cues
+let music: HTMLAudioElement | null = null;
+let musicEnabled = true;
+
 /** Create (or resume) the audio context. Safe to call repeatedly. */
 export function initAudio(): void {
   if (typeof window === 'undefined') return;
@@ -23,6 +31,28 @@ export function initAudio(): void {
     master.connect(ctx.destination);
   }
   if (ctx.state === 'suspended') void ctx.resume();
+  startMusic();                        // kick off the background track on this gesture
+}
+
+/** Start the looping background music (quiet). Safe to call repeatedly. */
+export function startMusic(): void {
+  if (typeof document === 'undefined' || !musicEnabled) return;
+  if (!music) {
+    music = new Audio(MUSIC_SRC);
+    music.loop = true;
+    music.volume = MUSIC_VOLUME;
+    music.preload = 'auto';
+  }
+  // play() may reject until a user gesture; swallow that quietly.
+  void music.play().catch(() => { /* will retry on the next gesture */ });
+}
+
+/** Toggle the background music independently of the sound effects. */
+export function setMusicEnabled(on: boolean): void {
+  musicEnabled = on;
+  if (!music) return;
+  if (on) void music.play().catch(() => {});
+  else music.pause();
 }
 
 export function setAudioEnabled(on: boolean): void { enabled = on; }

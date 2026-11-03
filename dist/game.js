@@ -17,6 +17,7 @@ export var GamePhase;
     GamePhase["PLAYING"] = "PLAYING";
     GamePhase["WON"] = "WON";
     GamePhase["DISSOLVING"] = "DISSOLVING";
+    GamePhase["GAME_OVER"] = "GAME_OVER";
 })(GamePhase || (GamePhase = {}));
 export function makeGameState() {
     return {
@@ -38,7 +39,29 @@ export function makeGameState() {
         speedMul: 1,
         shake: 0,
         spawnPick: 0,
+        best: 0,
+        flash: 0,
     };
+}
+/**
+ * Restart after a GAME OVER: keep the best-score, reset everything else to a
+ * fresh run and rebuild the level. Called by the input layer on a click while
+ * in GAME_OVER (the sim stays paused until then, like the start screen).
+ */
+export function restartGame(world, g) {
+    g.best = Math.max(g.best, g.wins);
+    g.wins = 0;
+    g.resets = 0;
+    g.gcSweeps = 0;
+    g.streak = 1;
+    g.combo = 0;
+    g.comboTtl = 0;
+    g.speedMul = 1;
+    g.shake = 0;
+    g.leakedRam = 0;
+    g.message = '';
+    g.messageTtl = 0;
+    buildLevel(world, g); // resets integrity + phase to PLAYING
 }
 const SINK_W = 200;
 const SINK_H = 150;
@@ -98,6 +121,75 @@ export function randomSinkPosition(world) {
     y = Math.max(topMin, Math.min(botMax, y));
     return { x: Math.max(minX, Math.min(maxX, x)), y };
 }
+const SPAWN_W = 190;
+const SPAWN_H = 96;
+/**
+ * Pick a random landing spot for the SOURCE. Mirrors the sink but on the LEFT
+ * side of the firewall, so each run starts from a different place and the
+ * opening eject arc has to be read fresh — more replayability.
+ */
+export function randomSpawnPosition(world) {
+    const barL = world.firewallX - world.firewallW / 2;
+    const minX = 10;
+    const maxX = Math.max(minX, barL - SPAWN_W - 30);
+    const topMin = 70; // below the HUD
+    const botMax = world.height - GAME.taskbarH - SPAWN_H - 40; // leave fall room
+    const x = minX + Math.random() * Math.max(0, maxX - minX);
+    const edge = Math.floor(Math.random() * 3);
+    let y;
+    if (edge === 0)
+        y = topMin; // top-left
+    else if (edge === 1)
+        y = (topMin + botMax) / 2; // left-middle
+    else
+        y = botMax; // bottom-left
+    y = Math.max(topMin, Math.min(botMax, y));
+    return { x: Math.max(minX, Math.min(maxX, x)), y };
+}
+/**
+ * Pick a random, non-overlapping spot for a starter platform of size (w,h).
+ * Stays below the HUD, above the taskbar, off the firewall band, and clear of
+ * already-placed windows. Falls back to a best-effort spot after a few tries.
+ */
+export function randomPlatformSpot(world, w, h, avoid) {
+    const topMin = 110; // below the HUD
+    const botMax = world.height - GAME.taskbarH - h - 20;
+    const barL = world.firewallX - world.firewallW / 2;
+    const barR = world.firewallX + world.firewallW / 2;
+    const overlaps = (x, y) => {
+        for (const o of avoid) {
+            if (x < o.rect.x + o.rect.w + 16 && x + w + 16 > o.rect.x &&
+                y < o.rect.y + o.rect.h + 16 && y + h + 16 > o.rect.y)
+                return true;
+        }
+        return false;
+    };
+    for (let tries = 0; tries < 30; tries++) {
+        // pick a side, then a spot fully on that side of the firewall
+        const leftSide = Math.random() < 0.5;
+        const x = leftSide
+            ? 10 + Math.random() * Math.max(0, barL - w - 20)
+            : barR + 10 + Math.random() * Math.max(0, world.width - barR - w - 20);
+        const y = topMin + Math.random() * Math.max(0, botMax - topMin);
+        const sx = world.firewallSafeX(x, w);
+        if (!overlaps(sx, y))
+            return { x: sx, y };
+    }
+    // fallback: just drop it somewhere legal on the left
+    return { x: world.firewallSafeX(20, w), y: topMin + Math.random() * 100 };
+}
+/** Relocate the source to a fresh random left-side spot (on reset/win). */
+export function relocateSpawn(world, g) {
+    const spawn = world.windows.find((w) => w.id === g.spawnId);
+    if (!spawn)
+        return;
+    const pos = randomSpawnPosition(world);
+    const sx = world.firewallSafeX(pos.x, spawn.rect.w);
+    spawn.rect.x = sx;
+    spawn.rect.y = pos.y;
+    spawn.prev.x = sx;
+    spawn.prev.y = pos.y;
+}
 /** Relocate the existing sink to a fresh random edge (after a delivery). */
 export function relocateSink(world, g) {
     const sink = world.windows.find((w) => w.id === g.sinkId);
@@ -114,18 +206,26 @@ export function relocateSink(world, g) {
  *  it clears existing windows and reseeds. */
 export function buildLevel(world, g) {
     world.windows = [];
-    // SPAWN — Download_Manager, top-left, emits the packet from its "port"
-    const spawn = world.spawnWindow(40, 110, 190, 96, 'Download_Manager', 205, WindowKind.SPAWN);
+    // SPAWN — Download_Manager at a random LEFT-side spot, emits the packet.
+    const sp = randomSpawnPosition(world);
+    const spawn = world.spawnWindow(sp.x, sp.y, SPAWN_W, SPAWN_H, 'Download_Manager', 205, WindowKind.SPAWN);
     g.spawnId = spawn.id;
     // SINK — Backup_Drive (D:), at a random right-side edge, with an active drop
     // zone (the body). Immovable, and relocated after every delivery.
     const pos = randomSinkPosition(world);
     const sink = world.spawnWindow(pos.x, pos.y, SINK_W, SINK_H, 'Backup_Drive (D:)', 135, WindowKind.SINK);
     g.sinkId = sink.id;
-    // starter platforms the player can rearrange (all RAM-costing)
-    world.spawnWindow(300, 250, 170, 110, 'bash', 150, WindowKind.TERMINAL);
-    world.spawnWindow(520, 320, 150, 110, 'player.fm', 320, WindowKind.MEDIA);
-    world.spawnWindow(250, 430, 160, 100, 'Temp Alert', 35, WindowKind.ALERT);
+    // Starter platforms: random KINDS at random, non-overlapping positions each
+    // build, so every run opens with a different layout to read and rearrange.
+    const existing = [spawn, sink];
+    for (let i = 0; i < 3; i++) {
+        const kind = SPAWNABLE_KINDS[1 + Math.floor(Math.random() * (SPAWNABLE_KINDS.length - 1))]; // skip PLAIN for variety
+        const pw = 150 + Math.floor(Math.random() * 40);
+        const ph = 96 + Math.floor(Math.random() * 24);
+        const spot = randomPlatformSpot(world, pw, ph, existing);
+        const win = world.spawnWindow(spot.x, spot.y, pw, ph, spawnableLabel(kind), hueFor(kind), kind);
+        existing.push(win);
+    }
     placePacketAtSpawn(world, g);
     g.phase = GamePhase.PLAYING;
     g.integrity = GAME.integrityStart;
@@ -158,6 +258,7 @@ export function placePacketAtSpawn(world, g) {
     a.state.localOffsetX = 0;
     a.state.dir = 1;
     a.state.spawnDwell = 0;
+    a.state.deliverable = false;
 }
 /** Recompute Memory Usage from the open (non-closing, non-protected) windows. */
 /** Base RAM allocation from the currently-open auxiliary windows. This is the
@@ -253,9 +354,11 @@ export function gameSystem(world, g, dt) {
         g.messageTtl -= dt;
     // difficulty ramp: scale patrol speed by the delivery count (Part 8)
     CONFIG.patrolSpeed = BASE_PATROL * g.speedMul;
-    // screen-shake decay
+    // screen-shake + damage-flash decay
     if (g.shake > 0)
         g.shake = Math.max(0, g.shake - FLOW.pacing.shakeDecay * dt);
+    if (g.flash > 0)
+        g.flash = Math.max(0, g.flash - 3 * dt); // ~0.33s fade
     // leapfrog auto-recycle + combo meter
     processRecycle(world, g, dt);
     // --- LIVE MEMORY LEAK (Part 7) ---------------------------------------
@@ -268,6 +371,12 @@ export function gameSystem(world, g, dt) {
     if (g.ram >= GAME.ramMax && openCount > 0) {
         emergencyGc(world, g);
         g.ram = totalRam(world, g); // recomputed after the sweep
+    }
+    // GAME OVER: hold indefinitely until the player restarts (handled by input).
+    // Keep decaying the shake so the crash jolt settles, but freeze everything
+    // else — no packet motion, no leak, no auto-advance.
+    if (g.phase === GamePhase.GAME_OVER) {
+        return;
     }
     // celebration / reset freeze
     if (g.phase !== GamePhase.PLAYING) {
@@ -283,6 +392,7 @@ export function gameSystem(world, g, dt) {
                 // The player's platform layout and integrity carry over, so a
                 // delivery flows straight into the next run with a new target.
                 relocateSink(world, g);
+                relocateSpawn(world, g); // new source spot too — fresh opening each run
                 placePacketAtSpawn(world, g);
             }
             g.phase = GamePhase.PLAYING;
@@ -290,9 +400,15 @@ export function gameSystem(world, g, dt) {
         return; // packet is frozen during celebration
     }
     const a = world.agent;
-    // --- WIN: packet enters the sink drop zone ---
+    // --- WIN: packet enters the sink drop zone via a REAL LAUNCH ---------
+    // The delivery only counts if the packet arrived through the air from an
+    // intentional launch (flick, source eject, or net bounce) — tracked by
+    // `deliverable`. Riding a window into the zone (grounded) or getting a free
+    // patrol edge-hop inside it does NOT count. This closes the slow/vertical
+    // ferry exploit completely.
     const sink = world.windows.find((w) => w.id === g.sinkId);
-    if (sink && overlapsDropZone(a.tf.pos.x, a.tf.pos.y, a.shape.radius, sink)) {
+    if (sink && a.state.deliverable && !a.state.grounded
+        && overlapsDropZone(a.tf.pos.x, a.tf.pos.y, a.shape.radius, sink)) {
         g.phase = GamePhase.WON;
         g.freeze = GAME.winFreeze;
         // arcade pacing: bump streak (1..max), ramp difficulty, shake + chord
@@ -309,14 +425,21 @@ export function gameSystem(world, g, dt) {
         g.integrity -= GAME.integrityPenalty;
         g.streak = 1; // integrity loss breaks the streak
         if (g.integrity <= 0) {
+            // GAME OVER: integrity depleted. The run ends here — record the best
+            // score and freeze into the game-over screen (click restarts).
             g.integrity = 0;
-            g.phase = GamePhase.DISSOLVING;
-            g.freeze = 0.9;
-            banner(g, 'PACKET DISSOLVED — restarting', 0.9);
+            g.best = Math.max(g.best, g.wins);
+            g.phase = GamePhase.GAME_OVER;
+            g.shake = FLOW.pacing.shakeOnWin * 1.5; // a big crash jolt
+            g.message = '';
+            g.messageTtl = 0; // the overlay shows the crash text
             cueDissolve();
         }
         else {
-            banner(g, `DATA INTEGRITY ${g.integrity}%`, 1.2);
+            // feedback on a (non-fatal) drop: red damage-flash, a jolt, loud banner.
+            banner(g, `⚠ PACKET LOST  −${GAME.integrityPenalty}%  ·  INTEGRITY ${g.integrity}%`, 1.4);
+            g.flash = 1;
+            g.shake = Math.max(g.shake, FLOW.pacing.shakeOnWin * 0.8);
             cueIntegrityLoss();
             placePacketAtSpawn(world, g);
         }

@@ -591,7 +591,7 @@ the local-coordinate fix is preserved.
 | Element | Window | Rule |
 |---------|--------|------|
 | Source | `Download_Manager` (SPAWN) | immovable launcher: holds the packet for a short dwell then **auto-ejects it in an arc toward the goal side** (it never patrols/edge-leaps off the source, so it can't idle bouncing on a fixed window); free RAM |
-| Goal | `Backup_Drive (D:)` (SINK) | its body below the title bar is an **active drop zone**; packet overlap ⇒ WIN. Immovable, and **relocates to a random right-side edge after every delivery** (platforms + integrity carry over) |
+| Goal | `Backup_Drive (D:)` (SINK) | **non-solid** drop zone — the packet flies into its body (you can't stand on or clip up through it). Delivery only counts when the packet arrives **airborne from a real launch** (flick / source eject / net bounce), tracked by `deliverable`; riding a window in, or a patrol edge-hop inside it, does NOT score. Immovable, and **relocates to a random right-side edge after every delivery** |
 | Fail line | taskbar (screen bottom) | packet falling below the taskbar top costs **Data Integrity** |
 
 - **Win:** `overlapsDropZone()` (AABB vs. the sink body). Triggers a short
@@ -643,6 +643,13 @@ player carpet the screen. The HUD RAM bar turns amber then red as it fills.
   - integrity loss → descending saw/square alarm
   - delivery → bright four-note triad
   - dissolve → low saw thud
+- **Background music:** a looping chiptune (*Tip C - Quirky 8-Bit Chiptune
+  Instrumental* by NickPanek, from pixabay.com) played via a separate
+  `<audio>` element at a low, fixed volume (0.1) — intentionally below the
+  effects master (0.18) so it never masks gameplay cues. It starts on the same
+  first-gesture `initAudio()` call and is independently muted with the **M**
+  key. Kept out of the Web Audio graph so a missing/looping track can never
+  interfere with the synthesized effects.
 
 ### 6.5 Verification
 

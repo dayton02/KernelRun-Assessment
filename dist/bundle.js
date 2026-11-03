@@ -189,16 +189,23 @@
       // horizontal accel toward the bar center (px/s^2)
     },
     // 2. Marquee Net: drag on empty wallpaper to draw a selection box; its top
-    //    edge is an elastic trampoline. Costs RAM while held.
+    //    edge is a SOFT safety net — a clutch save, not a trampoline floor. It
+    //    catches the packet a limited number of times, then is spent and must be
+    //    redrawn (which re-pays the RAM cost), so it can't be used as a permanent
+    //    bouncy floor.
     marquee: {
-      ramCost: 15,
-      // % RAM consumed while a marquee is held
-      restitution: 0.9,
-      // elastic bounce factor off the top border
-      minBounceVy: -620,
-      // guarantee at least this much upward pop
-      minSize: 24
-      // px: ignore accidental tiny marquees
+      ramCost: 25,
+      // % RAM consumed while a marquee is held (steep)
+      restitution: 0.45,
+      // soft, lossy bounce (saves, doesn't launch)
+      maxBounceVy: -520,
+      // CAP the upward pop (no rocket launches)
+      minBounceVy: -240,
+      // gentle guaranteed nudge so it always "saves"
+      charges: 2,
+      // catches before the net is spent
+      minSize: 40
+      // px: ignore small marquees (must commit to a real net)
     },
     // 3. Leapfrog Auto-Recycle: the window a packet LAUNCHED from decommissions
     //    on a timer once the packet lands elsewhere, refunding RAM + combo.
@@ -275,7 +282,7 @@
       this.firewallW = 8;
       // Emergency Marquee Net (Part 8): a selection box the player drags on empty
       // wallpaper. Its top edge is an elastic trampoline; costs RAM while held.
-      this.marquee = { active: false, x0: 0, y0: 0, x1: 0, y1: 0, cool: 0 };
+      this.marquee = { active: false, x0: 0, y0: 0, x1: 0, y1: 0, cool: 0, charges: 0 };
       // Spring-pop intent (Part 8): DOM input (click or Space) sets this; the
       // InputSystem consumes it INSIDE the fixed step so it stays in sync with the
       // physics (no event-loop race). Holds the target point to resolve a window.
@@ -300,7 +307,8 @@
           spawnDwell: 0,
           wobble: 0,
           ejectVx: 0,
-          ejectVy: 0
+          ejectVy: 0,
+          deliverable: false
         }
       };
     }
@@ -594,6 +602,10 @@
   var ctx = null;
   var master = null;
   var enabled = true;
+  var MUSIC_SRC = "./music/nickpanek-tip-c-quirky-8-bit-chiptune-instrumental-358658.mp3";
+  var MUSIC_VOLUME = 0.17;
+  var music = null;
+  var musicEnabled = true;
   function initAudio() {
     if (typeof window === "undefined") return;
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -608,6 +620,25 @@
       master.connect(ctx.destination);
     }
     if (ctx.state === "suspended") void ctx.resume();
+    startMusic();
+  }
+  function startMusic() {
+    if (typeof document === "undefined" || !musicEnabled) return;
+    if (!music) {
+      music = new Audio(MUSIC_SRC);
+      music.loop = true;
+      music.volume = MUSIC_VOLUME;
+      music.preload = "auto";
+    }
+    void music.play().catch(() => {
+    });
+  }
+  function setMusicEnabled(on) {
+    musicEnabled = on;
+    if (!music) return;
+    if (on) void music.play().catch(() => {
+    });
+    else music.pause();
   }
   function note(freq, dur, type = "sine", startGain = 0.6, slideTo) {
     if (!enabled || !ctx || !master) return;
@@ -643,9 +674,6 @@
   function cueGcSweep() {
     note(900, 0.25, "square", 0.4, 90);
     note(300, 0.3, "sawtooth", 0.3, 60);
-  }
-  function cueSpring() {
-    note(300, 0.12, "square", 0.45, 680);
   }
   function cueNet() {
     note(240, 0.14, "sine", 0.5, 520);
@@ -694,12 +722,6 @@
     if (p.released) {
       for (const w of world.windows) w.drag.grabbed = false;
     }
-    if (world.springRequest.pending) {
-      world.springRequest.pending = false;
-      const sr = world.springRequest;
-      const win = world.topWindowAt(sr.x, sr.y);
-      if (win) springPopWindow(world, win);
-    }
   }
   function windowSystem(world, dt) {
     const p = world.pointer;
@@ -727,8 +749,6 @@
       w.prev.y = py;
       w.prev.w = w.rect.w;
       w.prev.h = w.rect.h;
-      if (w.drag.springCooldown > 0) w.drag.springCooldown -= dt;
-      if (w.drag.springPop > 0) w.drag.springPop -= dt;
       if (w.style.closing > 0) w.style.closing += dt;
     }
     if (world.marquee.cool > 0) world.marquee.cool -= dt;
@@ -777,6 +797,7 @@
     const sorted = [...world.windows].sort((w1, w2) => w2.rect.z - w1.rect.z);
     for (const w of sorted) {
       if (w.style.closing > 0) continue;
+      if (w.arch.kind === "SINK" /* SINK */) continue;
       const rect = w.rect;
       if (!landedOn && a.kin.vel.y >= 0) {
         const rungY = terminalRungContact(w, a.tf.prev.y + r, a.tf.pos.y + r, a.tf.pos.x);
@@ -814,6 +835,7 @@
             if (fx.forceLaunch) {
               detach(world, w);
               a.state.fsm = "LAUNCHED" /* LAUNCHED */;
+              s.deliverable = true;
               landedOn = null;
               cueLaunch();
             }
@@ -848,7 +870,8 @@
       const gw = world.windows.find((w) => w.id === s.groundEntity);
       if (gw) {
         const upwardFlick = gw.drag.vy < -CONFIG.flickThreshold;
-        const overSpeed = !upwardFlick && Math.abs(gw.drag.vx) > CONFIG.slipThreshold;
+        const dragSpeed = Math.hypot(gw.drag.vx, gw.drag.vy);
+        const overSpeed = !upwardFlick && dragSpeed > CONFIG.slipThreshold;
         if (overSpeed) {
           if (s.wobble <= 0) s.wobble = FLOW.slip.wobbleTime;
           s.wobble -= dt;
@@ -879,6 +902,7 @@
             a.kin.vel.x = toCenter * s.ejectVx;
             a.kin.vel.y = s.ejectVy;
             a.state.fsm = "LAUNCHED" /* LAUNCHED */;
+            s.deliverable = true;
             cueLaunch();
             s.wall = newWall;
             return;
@@ -909,6 +933,7 @@
         }
       }
     }
+    depenetrate(world, landedOn);
     const floor = world.height - 4;
     if (a.tf.pos.y + r >= floor) {
       a.tf.pos.y = floor - r;
@@ -937,6 +962,7 @@
         w.rect.w - world.agent.shape.radius
       );
       s.wobble = 0;
+      s.deliverable = false;
       cueLand();
       if (launchTracker.lastLaunchWin != null && launchTracker.lastLaunchWin !== w.id) {
         launchTracker.landedElsewhere = true;
@@ -966,6 +992,7 @@
     detach(world, w);
     a.kin.vel.y = -CONFIG.edgeJumpImpulse;
     a.state.fsm = "JUMPING" /* JUMPING */;
+    a.state.deliverable = false;
   }
   function nearestCatchCone(world) {
     const a = world.agent;
@@ -990,24 +1017,37 @@
     }
     return best ?? 0;
   }
-  function springPopWindow(world, w) {
-    if (w.arch.protectedWin || w.style.closing > 0) return false;
-    if (w.drag.springCooldown > 0) return false;
-    w.drag.springCooldown = FLOW.spring.cooldown;
-    w.drag.springPop = 0.18;
-    w.drag.grabbed = false;
+  function depenetrate(world, grounded) {
     const a = world.agent;
-    const s = a.state;
-    if (s.grounded && s.groundEntity === w.id) {
-      detach(world, w);
-      a.kin.vel.y = -FLOW.spring.impulse;
-      a.kin.vel.x = s.dir * CONFIG.patrolSpeed;
-      s.fsm = "LAUNCHED" /* LAUNCHED */;
-      cueSpring();
-      return true;
+    const r = a.shape.radius;
+    for (const w of world.windows) {
+      if (w.style.closing > 0) continue;
+      if (w.arch.kind === "SINK" /* SINK */) continue;
+      if (grounded && w.id === grounded.id) continue;
+      const rc = w.rect;
+      const cx = a.tf.pos.x, cy = a.tf.pos.y;
+      const left = rc.x, right = rc.x + rc.w, top = rc.y, bottom = rc.y + rc.h;
+      if (cx + r <= left || cx - r >= right || cy + r <= top || cy - r >= bottom) continue;
+      const penL = cx + r - left;
+      const penR = right - (cx - r);
+      const penT = cy + r - top;
+      const penB = bottom - (cy - r);
+      const minPen = Math.min(penL, penR, penT, penB);
+      if (minPen === penT) {
+        a.tf.pos.y = top - r;
+        if (a.kin.vel.y > 0) a.kin.vel.y = 0;
+        if (!grounded && a.kin.vel.y <= 1e-3) attach(world, w);
+      } else if (minPen === penB) {
+        a.tf.pos.y = bottom + r;
+        if (a.kin.vel.y < 0) a.kin.vel.y = 0;
+      } else if (minPen === penL) {
+        a.tf.pos.x = left - r;
+        a.kin.vel.x = 0;
+      } else {
+        a.tf.pos.x = right + r;
+        a.kin.vel.x = 0;
+      }
     }
-    cueSpring();
-    return false;
   }
   function marqueeNet(world) {
     const m = world.marquee;
@@ -1025,11 +1065,20 @@
     const crossed = feetPrev <= topPrev && feetNow >= topPrev;
     const overlapX = a.tf.pos.x + r > b.x && a.tf.pos.x - r < b.x + b.w;
     if (crossed && overlapX) {
+      if (m.charges <= 0) return false;
       a.tf.pos.y = topPrev - r;
-      const bounce = Math.min(-a.kin.vel.y * FLOW.marquee.restitution, FLOW.marquee.minBounceVy);
+      const raw = -a.kin.vel.y * FLOW.marquee.restitution;
+      const bounce = Math.max(
+        FLOW.marquee.maxBounceVy,
+        // cap magnitude (more negative = faster up)
+        Math.min(FLOW.marquee.minBounceVy, raw)
+      );
       a.kin.vel.y = bounce;
-      s.fsm = "LAUNCHED" /* LAUNCHED */;
-      m.cool = 0.25;
+      s.fsm = "FALLING" /* FALLING */;
+      s.deliverable = true;
+      m.cool = 0.3;
+      m.charges -= 1;
+      if (m.charges <= 0) m.active = false;
       cueNet();
       return true;
     }
@@ -1046,6 +1095,7 @@
       }
       a.kin.vel.y = clamp(vy * e, -CONFIG.launchMax, 0);
       a.state.fsm = "LAUNCHED" /* LAUNCHED */;
+      a.state.deliverable = true;
       cueLaunch();
     }
   }
@@ -1091,8 +1141,25 @@
       comboTtl: 0,
       speedMul: 1,
       shake: 0,
-      spawnPick: 0
+      spawnPick: 0,
+      best: 0,
+      flash: 0
     };
+  }
+  function restartGame(world, g) {
+    g.best = Math.max(g.best, g.wins);
+    g.wins = 0;
+    g.resets = 0;
+    g.gcSweeps = 0;
+    g.streak = 1;
+    g.combo = 0;
+    g.comboTtl = 0;
+    g.speedMul = 1;
+    g.shake = 0;
+    g.leakedRam = 0;
+    g.message = "";
+    g.messageTtl = 0;
+    buildLevel(world, g);
   }
   var SINK_W = 200;
   var SINK_H = 150;
@@ -1150,6 +1217,53 @@
     y = Math.max(topMin, Math.min(botMax, y));
     return { x: Math.max(minX, Math.min(maxX, x)), y };
   }
+  var SPAWN_W = 190;
+  var SPAWN_H = 96;
+  function randomSpawnPosition(world) {
+    const barL = world.firewallX - world.firewallW / 2;
+    const minX = 10;
+    const maxX = Math.max(minX, barL - SPAWN_W - 30);
+    const topMin = 70;
+    const botMax = world.height - GAME.taskbarH - SPAWN_H - 40;
+    const x = minX + Math.random() * Math.max(0, maxX - minX);
+    const edge = Math.floor(Math.random() * 3);
+    let y;
+    if (edge === 0) y = topMin;
+    else if (edge === 1) y = (topMin + botMax) / 2;
+    else y = botMax;
+    y = Math.max(topMin, Math.min(botMax, y));
+    return { x: Math.max(minX, Math.min(maxX, x)), y };
+  }
+  function randomPlatformSpot(world, w, h, avoid) {
+    const topMin = 110;
+    const botMax = world.height - GAME.taskbarH - h - 20;
+    const barL = world.firewallX - world.firewallW / 2;
+    const barR = world.firewallX + world.firewallW / 2;
+    const overlaps = (x, y) => {
+      for (const o of avoid) {
+        if (x < o.rect.x + o.rect.w + 16 && x + w + 16 > o.rect.x && y < o.rect.y + o.rect.h + 16 && y + h + 16 > o.rect.y) return true;
+      }
+      return false;
+    };
+    for (let tries = 0; tries < 30; tries++) {
+      const leftSide = Math.random() < 0.5;
+      const x = leftSide ? 10 + Math.random() * Math.max(0, barL - w - 20) : barR + 10 + Math.random() * Math.max(0, world.width - barR - w - 20);
+      const y = topMin + Math.random() * Math.max(0, botMax - topMin);
+      const sx = world.firewallSafeX(x, w);
+      if (!overlaps(sx, y)) return { x: sx, y };
+    }
+    return { x: world.firewallSafeX(20, w), y: topMin + Math.random() * 100 };
+  }
+  function relocateSpawn(world, g) {
+    const spawn = world.windows.find((w) => w.id === g.spawnId);
+    if (!spawn) return;
+    const pos = randomSpawnPosition(world);
+    const sx = world.firewallSafeX(pos.x, spawn.rect.w);
+    spawn.rect.x = sx;
+    spawn.rect.y = pos.y;
+    spawn.prev.x = sx;
+    spawn.prev.y = pos.y;
+  }
   function relocateSink(world, g) {
     const sink = world.windows.find((w) => w.id === g.sinkId);
     if (!sink) return;
@@ -1162,14 +1276,21 @@
   }
   function buildLevel(world, g) {
     world.windows = [];
-    const spawn = world.spawnWindow(40, 110, 190, 96, "Download_Manager", 205, "SPAWN" /* SPAWN */);
+    const sp = randomSpawnPosition(world);
+    const spawn = world.spawnWindow(sp.x, sp.y, SPAWN_W, SPAWN_H, "Download_Manager", 205, "SPAWN" /* SPAWN */);
     g.spawnId = spawn.id;
     const pos = randomSinkPosition(world);
     const sink = world.spawnWindow(pos.x, pos.y, SINK_W, SINK_H, "Backup_Drive (D:)", 135, "SINK" /* SINK */);
     g.sinkId = sink.id;
-    world.spawnWindow(300, 250, 170, 110, "bash", 150, "TERMINAL" /* TERMINAL */);
-    world.spawnWindow(520, 320, 150, 110, "player.fm", 320, "MEDIA" /* MEDIA */);
-    world.spawnWindow(250, 430, 160, 100, "Temp Alert", 35, "ALERT" /* ALERT */);
+    const existing = [spawn, sink];
+    for (let i = 0; i < 3; i++) {
+      const kind = SPAWNABLE_KINDS[1 + Math.floor(Math.random() * (SPAWNABLE_KINDS.length - 1))];
+      const pw = 150 + Math.floor(Math.random() * 40);
+      const ph = 96 + Math.floor(Math.random() * 24);
+      const spot = randomPlatformSpot(world, pw, ph, existing);
+      const win = world.spawnWindow(spot.x, spot.y, pw, ph, spawnableLabel(kind), hueFor(kind), kind);
+      existing.push(win);
+    }
     placePacketAtSpawn(world, g);
     g.phase = "PLAYING" /* PLAYING */;
     g.integrity = GAME.integrityStart;
@@ -1199,6 +1320,7 @@
     a.state.localOffsetX = 0;
     a.state.dir = 1;
     a.state.spawnDwell = 0;
+    a.state.deliverable = false;
   }
   function baseRam(world) {
     let ram = 0;
@@ -1265,6 +1387,7 @@
     if (g.messageTtl > 0) g.messageTtl -= dt;
     CONFIG.patrolSpeed = BASE_PATROL * g.speedMul;
     if (g.shake > 0) g.shake = Math.max(0, g.shake - FLOW.pacing.shakeDecay * dt);
+    if (g.flash > 0) g.flash = Math.max(0, g.flash - 3 * dt);
     processRecycle(world, g, dt);
     const openCount = auxWindowCount(world);
     g.leakedRam += GAME.ramLeakPerWindow * openCount * dt;
@@ -1272,6 +1395,9 @@
     if (g.ram >= GAME.ramMax && openCount > 0) {
       emergencyGc(world, g);
       g.ram = totalRam(world, g);
+    }
+    if (g.phase === "GAME_OVER" /* GAME_OVER */) {
+      return;
     }
     if (g.phase !== "PLAYING" /* PLAYING */) {
       g.freeze -= dt;
@@ -1283,6 +1409,7 @@
         if (g.phase === "WON" /* WON */) {
           g.wins++;
           relocateSink(world, g);
+          relocateSpawn(world, g);
           placePacketAtSpawn(world, g);
         }
         g.phase = "PLAYING" /* PLAYING */;
@@ -1291,7 +1418,7 @@
     }
     const a = world.agent;
     const sink = world.windows.find((w) => w.id === g.sinkId);
-    if (sink && overlapsDropZone(a.tf.pos.x, a.tf.pos.y, a.shape.radius, sink)) {
+    if (sink && a.state.deliverable && !a.state.grounded && overlapsDropZone(a.tf.pos.x, a.tf.pos.y, a.shape.radius, sink)) {
       g.phase = "WON" /* WON */;
       g.freeze = GAME.winFreeze;
       g.streak = Math.min(FLOW.pacing.streakMax, g.streak + 1);
@@ -1307,12 +1434,16 @@
       g.streak = 1;
       if (g.integrity <= 0) {
         g.integrity = 0;
-        g.phase = "DISSOLVING" /* DISSOLVING */;
-        g.freeze = 0.9;
-        banner(g, "PACKET DISSOLVED \u2014 restarting", 0.9);
+        g.best = Math.max(g.best, g.wins);
+        g.phase = "GAME_OVER" /* GAME_OVER */;
+        g.shake = FLOW.pacing.shakeOnWin * 1.5;
+        g.message = "";
+        g.messageTtl = 0;
         cueDissolve();
       } else {
-        banner(g, `DATA INTEGRITY ${g.integrity}%`, 1.2);
+        banner(g, `\u26A0 PACKET LOST  \u2212${GAME.integrityPenalty}%  \xB7  INTEGRITY ${g.integrity}%`, 1.4);
+        g.flash = 1;
+        g.shake = Math.max(g.shake, FLOW.pacing.shakeOnWin * 0.8);
         cueIntegrityLoss();
         placePacketAtSpawn(world, g);
       }
@@ -1364,7 +1495,7 @@
     ["SINK" /* SINK */]: " [DST]",
     ["ALERT" /* ALERT */]: " [!]"
   };
-  function render(ctx2, world, game) {
+  function render(ctx2, world, game, started = true) {
     ctx2.clearRect(0, 0, world.width, world.height);
     ctx2.save();
     if (game && game.shake > 0) {
@@ -1458,8 +1589,62 @@
     ctx2.globalAlpha = 1;
     drawTaskbar(ctx2, world, game);
     ctx2.restore();
+    if (game && game.flash > 0) {
+      ctx2.fillStyle = `rgba(255,60,60,${0.35 * game.flash})`;
+      ctx2.fillRect(0, 0, world.width, world.height);
+      ctx2.fillStyle = `rgba(255,90,90,${0.5 * game.flash})`;
+      ctx2.fillRect(0, world.height - GAME.taskbarH - 4, world.width, 4);
+    }
     if (game) drawGameHud(ctx2, world, game);
     else drawHud(ctx2, world);
+    if (!started) {
+      ctx2.fillStyle = "rgba(6,9,18,0.72)";
+      ctx2.fillRect(0, 0, world.width, world.height);
+      ctx2.textAlign = "center";
+      ctx2.fillStyle = "#eaf0ff";
+      ctx2.font = "700 34px system-ui, sans-serif";
+      ctx2.fillText("KERNEL RUN", world.width / 2, world.height / 2 - 24);
+      ctx2.fillStyle = "#ffd166";
+      ctx2.font = "600 18px system-ui, sans-serif";
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 350);
+      ctx2.globalAlpha = 0.6 + 0.4 * pulse;
+      ctx2.fillText("\u25B6 Click anywhere to start playing", world.width / 2, world.height / 2 + 14);
+      ctx2.globalAlpha = 1;
+      ctx2.fillStyle = "#9fb0d0";
+      ctx2.font = "13px system-ui, sans-serif";
+      ctx2.fillText(
+        "Flick a window upward to launch the packet across the Firewall",
+        world.width / 2,
+        world.height / 2 + 44
+      );
+      ctx2.textAlign = "left";
+    }
+    if (game && game.phase === "GAME_OVER" /* GAME_OVER */) {
+      ctx2.fillStyle = "rgba(30,6,10,0.78)";
+      ctx2.fillRect(0, 0, world.width, world.height);
+      ctx2.textAlign = "center";
+      const cx = world.width / 2, cy = world.height / 2;
+      ctx2.fillStyle = "#ff6b6b";
+      ctx2.font = "800 40px system-ui, sans-serif";
+      ctx2.fillText("SYSTEM CRASH", cx, cy - 46);
+      ctx2.fillStyle = "#ffd166";
+      ctx2.font = "600 16px ui-monospace, monospace";
+      ctx2.fillText("DATA INTEGRITY 0% \u2014 packet lost", cx, cy - 16);
+      ctx2.fillStyle = "#eaf0ff";
+      ctx2.font = "700 22px system-ui, sans-serif";
+      ctx2.fillText(`Packets delivered: ${game.wins}`, cx, cy + 22);
+      ctx2.fillStyle = game.wins >= game.best && game.wins > 0 ? "#6cff9a" : "#9fb0d0";
+      ctx2.font = "15px system-ui, sans-serif";
+      const bestLine = game.wins >= game.best && game.wins > 0 ? `\u2605 NEW BEST: ${game.best}` : `Best: ${game.best}`;
+      ctx2.fillText(bestLine, cx, cy + 48);
+      ctx2.fillStyle = "#ffd166";
+      ctx2.font = "600 16px system-ui, sans-serif";
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 350);
+      ctx2.globalAlpha = 0.55 + 0.45 * pulse;
+      ctx2.fillText("\u25B6 Click to run again", cx, cy + 84);
+      ctx2.globalAlpha = 1;
+      ctx2.textAlign = "left";
+    }
   }
   function drawMarquee(ctx2, world) {
     const m = world.marquee;
@@ -1477,6 +1662,10 @@
     ctx2.moveTo(x, y);
     ctx2.lineTo(x + w, y);
     ctx2.stroke();
+    ctx2.fillStyle = "#bcd6ff";
+    ctx2.font = "11px ui-monospace, monospace";
+    const max = FLOW.marquee.charges;
+    ctx2.fillText(`net: ${"\u25CF".repeat(Math.max(0, m.charges))}${"\u25CB".repeat(Math.max(0, max - m.charges))}`, x + 2, y - 4);
   }
   function drawTaskbar(ctx2, world, game) {
     const h = GAME.taskbarH;
@@ -1696,7 +1885,7 @@
     ctx2.fillStyle = "#cfd8ec";
     ctx2.font = "11px ui-monospace, monospace";
     ctx2.fillText(`spawn \u25B8 ${spawnableLabel(nextKind)}  (wheel to change, dbl-click to place)`, 10, world.height - GAME.taskbarH - 10);
-    if (g.messageTtl > 0 && g.message) {
+    if (g.messageTtl > 0 && g.message && g.phase !== "GAME_OVER" /* GAME_OVER */) {
       ctx2.globalAlpha = Math.min(1, g.messageTtl * 2);
       ctx2.fillStyle = g.phase === "WON" /* WON */ ? "#6cff9a" : "#ffd166";
       ctx2.font = "600 22px system-ui, sans-serif";
@@ -1724,26 +1913,38 @@
   // src/main.ts
   function boot(canvas) {
     const ctx2 = canvas.getContext("2d");
-    const world = new World(canvas.width, canvas.height);
+    const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    const rect0 = canvas.getBoundingClientRect();
+    const cssW = Math.max(640, Math.round(rect0.width || 820));
+    const cssH = Math.max(480, Math.round(rect0.height || 620));
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    ctx2.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const world = new World(cssW, cssH);
     const game = makeGameState();
     buildLevel(world, game);
+    let started = false;
     const setPos = (e) => {
       const rect = canvas.getBoundingClientRect();
-      world.pointer.x = (e.clientX - rect.left) * (canvas.width / rect.width);
-      world.pointer.y = (e.clientY - rect.top) * (canvas.height / rect.height);
+      world.pointer.x = (e.clientX - rect.left) * (world.width / rect.width);
+      world.pointer.y = (e.clientY - rect.top) * (world.height / rect.height);
     };
-    let pressT = 0, pressX = 0, pressY = 0, pressWin = false, marqueeStarted = false;
+    let marqueeStarted = false;
     canvas.addEventListener("pointerdown", (e) => {
       initAudio();
       setPos(e);
+      if (!started) {
+        started = true;
+        return;
+      }
+      if (game.phase === "GAME_OVER" /* GAME_OVER */) {
+        restartGame(world, game);
+        return;
+      }
       world.pointer.down = true;
       world.pointer.pressed = true;
       canvas.setPointerCapture(e.pointerId);
-      pressT = performance.now();
-      pressX = world.pointer.x;
-      pressY = world.pointer.y;
       const hit = world.topWindowAt(world.pointer.x, world.pointer.y);
-      pressWin = !!hit;
       marqueeStarted = false;
       if (!hit) {
         world.marquee.active = true;
@@ -1751,6 +1952,8 @@
         world.marquee.y0 = world.pointer.y;
         world.marquee.x1 = world.pointer.x;
         world.marquee.y1 = world.pointer.y;
+        world.marquee.charges = FLOW.marquee.charges;
+        world.marquee.cool = 0;
         marqueeStarted = true;
       }
     });
@@ -1765,22 +1968,14 @@
       setPos(e);
       world.pointer.down = false;
       world.pointer.released = true;
-      const dt = performance.now() - pressT;
-      const moved = Math.hypot(world.pointer.x - pressX, world.pointer.y - pressY);
-      if (pressWin && dt <= FLOW.spring.clickMaxMs && moved <= FLOW.spring.clickMaxMove) {
-        world.springRequest.pending = true;
-        world.springRequest.x = pressX;
-        world.springRequest.y = pressY;
-      }
       world.marquee.active = false;
       marqueeStarted = false;
     });
+    let musicOn = true;
     window.addEventListener("keydown", (e) => {
-      if (e.code === "Space") {
-        e.preventDefault();
-        world.springRequest.pending = true;
-        world.springRequest.x = world.pointer.x;
-        world.springRequest.y = world.pointer.y;
+      if (e.code === "KeyM") {
+        musicOn = !musicOn;
+        setMusicEnabled(musicOn);
       }
     });
     canvas.addEventListener("wheel", (e) => {
@@ -1801,14 +1996,19 @@
     let last = performance.now();
     let acc = 0;
     function frame(now) {
-      acc += Math.min(0.1, (now - last) / 1e3);
+      const elapsed = Math.min(0.1, (now - last) / 1e3);
       last = now;
-      while (acc >= CONFIG.dt) {
-        stepWorld(world, CONFIG.dt);
-        gameSystem(world, game, CONFIG.dt);
-        acc -= CONFIG.dt;
+      if (started) {
+        acc += elapsed;
+        while (acc >= CONFIG.dt) {
+          stepWorld(world, CONFIG.dt);
+          gameSystem(world, game, CONFIG.dt);
+          acc -= CONFIG.dt;
+        }
+      } else {
+        acc = 0;
       }
-      render(ctx2, world, game);
+      render(ctx2, world, game, started);
       requestAnimationFrame(frame);
     }
     requestAnimationFrame(frame);
