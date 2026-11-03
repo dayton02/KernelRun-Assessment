@@ -276,8 +276,10 @@
       // Emergency Marquee Net (Part 8): a selection box the player drags on empty
       // wallpaper. Its top edge is an elastic trampoline; costs RAM while held.
       this.marquee = { active: false, x0: 0, y0: 0, x1: 0, y1: 0, cool: 0 };
-      // Keyboard: spacebar edge for click-to-spring on the hovered window.
-      this.springKey = false;
+      // Spring-pop intent (Part 8): DOM input (click or Space) sets this; the
+      // InputSystem consumes it INSIDE the fixed step so it stays in sync with the
+      // physics (no event-loop race). Holds the target point to resolve a window.
+      this.springRequest = { pending: false, x: 0, y: 0 };
       this.nextId = 1;
       this.width = width;
       this.height = height;
@@ -305,7 +307,27 @@
     alloc() {
       return this.nextId++;
     }
+    /**
+     * Clamp a window's left-X so its body never straddles the firewall stripe.
+     * A window whose requested span crosses the barrier is pushed fully onto the
+     * side its CENTER is nearer (ties go left). Guarantees no tab can spawn in
+     * between the firewall regardless of caller coordinates or screen width.
+     */
+    firewallSafeX(x, w) {
+      const barL = this.firewallX - this.firewallW / 2;
+      const barR = this.firewallX + this.firewallW / 2;
+      const left = x;
+      const right = x + w;
+      if (right <= barL) return x;
+      if (left >= barR) return x;
+      const center = x + w / 2;
+      if (center < this.firewallX) {
+        return Math.max(0, barL - w);
+      }
+      return Math.min(this.width - w, barR);
+    }
     spawnWindow(x, y, w, h, title, hue, kind = "PLAIN" /* PLAIN */) {
+      x = this.firewallSafeX(x, w);
       const win = {
         id: this.alloc(),
         rect: { x, y, w, h, z: this.windows.length },
@@ -672,6 +694,12 @@
     if (p.released) {
       for (const w of world.windows) w.drag.grabbed = false;
     }
+    if (world.springRequest.pending) {
+      world.springRequest.pending = false;
+      const sr = world.springRequest;
+      const win = world.topWindowAt(sr.x, sr.y);
+      if (win) springPopWindow(world, win);
+    }
   }
   function windowSystem(world, dt) {
     const p = world.pointer;
@@ -967,6 +995,7 @@
     if (w.drag.springCooldown > 0) return false;
     w.drag.springCooldown = FLOW.spring.cooldown;
     w.drag.springPop = 0.18;
+    w.drag.grabbed = false;
     const a = world.agent;
     const s = a.state;
     if (s.grounded && s.groundEntity === w.id) {
@@ -1061,11 +1090,51 @@
       combo: 0,
       comboTtl: 0,
       speedMul: 1,
-      shake: 0
+      shake: 0,
+      spawnPick: 0
     };
   }
   var SINK_W = 200;
   var SINK_H = 150;
+  var SPAWNABLE_KINDS = [
+    "PLAIN" /* PLAIN */,
+    "TERMINAL" /* TERMINAL */,
+    "MEDIA" /* MEDIA */,
+    "EDITOR" /* EDITOR */,
+    "ALERT" /* ALERT */
+  ];
+  function spawnableLabel(kind) {
+    switch (kind) {
+      case "PLAIN" /* PLAIN */:
+        return "scratch.win";
+      case "TERMINAL" /* TERMINAL */:
+        return "bash";
+      case "MEDIA" /* MEDIA */:
+        return "player.fm";
+      case "EDITOR" /* EDITOR */:
+        return "notes.txt";
+      case "ALERT" /* ALERT */:
+        return "Temp Alert";
+      default:
+        return "window";
+    }
+  }
+  function hueFor(kind) {
+    switch (kind) {
+      case "PLAIN" /* PLAIN */:
+        return 265;
+      case "TERMINAL" /* TERMINAL */:
+        return 150;
+      case "MEDIA" /* MEDIA */:
+        return 320;
+      case "EDITOR" /* EDITOR */:
+        return 50;
+      case "ALERT" /* ALERT */:
+        return 35;
+      default:
+        return 210;
+    }
+  }
   function randomSinkPosition(world) {
     const barR = world.firewallX + world.firewallW / 2;
     const minX = barR + 30;
@@ -1085,9 +1154,10 @@
     const sink = world.windows.find((w) => w.id === g.sinkId);
     if (!sink) return;
     const pos = randomSinkPosition(world);
-    sink.rect.x = pos.x;
+    const sx = world.firewallSafeX(pos.x, sink.rect.w);
+    sink.rect.x = sx;
     sink.rect.y = pos.y;
-    sink.prev.x = pos.x;
+    sink.prev.x = sx;
     sink.prev.y = pos.y;
   }
   function buildLevel(world, g) {
@@ -1622,6 +1692,10 @@
     ctx2.fillStyle = "#7f8db0";
     ctx2.font = "10px ui-monospace, monospace";
     ctx2.fillText(`speed ${(g.speedMul * 100).toFixed(0)}%`, world.width - 230, 74);
+    const nextKind = SPAWNABLE_KINDS[g.spawnPick];
+    ctx2.fillStyle = "#cfd8ec";
+    ctx2.font = "11px ui-monospace, monospace";
+    ctx2.fillText(`spawn \u25B8 ${spawnableLabel(nextKind)}  (wheel to change, dbl-click to place)`, 10, world.height - GAME.taskbarH - 10);
     if (g.messageTtl > 0 && g.message) {
       ctx2.globalAlpha = Math.min(1, g.messageTtl * 2);
       ctx2.fillStyle = g.phase === "WON" /* WON */ ? "#6cff9a" : "#ffd166";
@@ -1694,8 +1768,9 @@
       const dt = performance.now() - pressT;
       const moved = Math.hypot(world.pointer.x - pressX, world.pointer.y - pressY);
       if (pressWin && dt <= FLOW.spring.clickMaxMs && moved <= FLOW.spring.clickMaxMove) {
-        const hit = world.topWindowAt(pressX, pressY);
-        if (hit) springPopWindow(world, hit);
+        world.springRequest.pending = true;
+        world.springRequest.x = pressX;
+        world.springRequest.y = pressY;
       }
       world.marquee.active = false;
       marqueeStarted = false;
@@ -1703,22 +1778,25 @@
     window.addEventListener("keydown", (e) => {
       if (e.code === "Space") {
         e.preventDefault();
-        const hit = world.topWindowAt(world.pointer.x, world.pointer.y);
-        if (hit) springPopWindow(world, hit);
+        world.springRequest.pending = true;
+        world.springRequest.x = world.pointer.x;
+        world.springRequest.y = world.pointer.y;
       }
     });
+    canvas.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const n = SPAWNABLE_KINDS.length;
+      game.spawnPick = (game.spawnPick + (e.deltaY > 0 ? 1 : n - 1)) % n;
+    }, { passive: false });
     canvas.addEventListener("dblclick", (e) => {
       setPos(e);
       const onWindow = world.topWindowAt(world.pointer.x, world.pointer.y);
       if (onWindow) return;
       if (!canSpawn(world, game)) return;
+      const kind = SPAWNABLE_KINDS[game.spawnPick];
       const w = 150, h = 90;
-      let sx = Math.max(0, world.pointer.x - w / 2);
-      const barL = world.firewallX - world.firewallW / 2;
-      const barR = world.firewallX + world.firewallW / 2;
-      if (world.pointer.x < world.firewallX) sx = Math.min(sx, barL - w);
-      else sx = Math.max(sx, barR);
-      world.spawnWindow(sx, Math.max(40, world.pointer.y - h / 2), w, h, "scratch.win", 265, "PLAIN" /* PLAIN */);
+      const sx = Math.max(0, world.pointer.x - w / 2);
+      world.spawnWindow(sx, Math.max(40, world.pointer.y - h / 2), w, h, spawnableLabel(kind), hueFor(kind), kind);
     });
     let last = performance.now();
     let acc = 0;

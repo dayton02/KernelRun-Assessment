@@ -3,7 +3,7 @@
 import { FsmState, Win, WindowKind } from './components.js';
 import { World } from './world.js';
 import { GAME } from './config.js';
-import { GameState, GamePhase, predictFlickArc, overlapsDropZone } from './game.js';
+import { GameState, GamePhase, predictFlickArc, overlapsDropZone, SPAWNABLE_KINDS, spawnableLabel } from './game.js';
 
 const KIND_TAG: Record<WindowKind, string> = {
   [WindowKind.PLAIN]: '',
@@ -386,6 +386,12 @@ function drawGameHud(ctx: CanvasRenderingContext2D, world: World, g: GameState):
   ctx.fillStyle = '#7f8db0';
   ctx.font = '10px ui-monospace, monospace';
   ctx.fillText(`speed ${(g.speedMul * 100).toFixed(0)}%`, world.width - 230, 74);
+
+  // next-spawn selector (wheel to cycle, double-click empty desktop to place)
+  const nextKind = SPAWNABLE_KINDS[g.spawnPick];
+  ctx.fillStyle = '#cfd8ec';
+  ctx.font = '11px ui-monospace, monospace';
+  ctx.fillText(`spawn ▸ ${spawnableLabel(nextKind)}  (wheel to change, dbl-click to place)`, 10, world.height - GAME.taskbarH - 10);
 
   // transient banner
   if (g.messageTtl > 0 && g.message) {

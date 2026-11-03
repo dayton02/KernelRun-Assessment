@@ -71,8 +71,10 @@ export class World {
   // Emergency Marquee Net (Part 8): a selection box the player drags on empty
   // wallpaper. Its top edge is an elastic trampoline; costs RAM while held.
   marquee: Marquee = { active: false, x0: 0, y0: 0, x1: 0, y1: 0, cool: 0 };
-  // Keyboard: spacebar edge for click-to-spring on the hovered window.
-  springKey = false;
+  // Spring-pop intent (Part 8): DOM input (click or Space) sets this; the
+  // InputSystem consumes it INSIDE the fixed step so it stays in sync with the
+  // physics (no event-loop race). Holds the target point to resolve a window.
+  springRequest: { pending: boolean; x: number; y: number } = { pending: false, x: 0, y: 0 };
   private nextId = 1;
 
   constructor(width: number, height: number) {
@@ -102,10 +104,33 @@ export class World {
 
   alloc(): number { return this.nextId++; }
 
+  /**
+   * Clamp a window's left-X so its body never straddles the firewall stripe.
+   * A window whose requested span crosses the barrier is pushed fully onto the
+   * side its CENTER is nearer (ties go left). Guarantees no tab can spawn in
+   * between the firewall regardless of caller coordinates or screen width.
+   */
+  firewallSafeX(x: number, w: number): number {
+    const barL = this.firewallX - this.firewallW / 2;
+    const barR = this.firewallX + this.firewallW / 2;
+    const left = x;
+    const right = x + w;
+    // already clear of the barrier on one side
+    if (right <= barL) return x;
+    if (left >= barR) return x;
+    // straddling: choose the side the window center is closer to
+    const center = x + w / 2;
+    if (center < this.firewallX) {
+      return Math.max(0, barL - w);   // snap fully to the LEFT of the barrier
+    }
+    return Math.min(this.width - w, barR); // snap fully to the RIGHT
+  }
+
   spawnWindow(
     x: number, y: number, w: number, h: number, title: string, hue: number,
     kind: WindowKind = WindowKind.PLAIN,
   ): Win {
+    x = this.firewallSafeX(x, w);   // never let a window straddle the firewall
     const win: Win = {
       id: this.alloc(),
       rect: { x, y, w, h, z: this.windows.length },

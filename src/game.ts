@@ -36,6 +36,7 @@ export interface GameState {
   comboTtl: number;       // seconds left to chain the next recycle
   speedMul: number;       // patrol-speed difficulty ramp (1 = base)
   shake: number;          // current screen-shake amplitude (px)
+  spawnPick: number;      // index into SPAWNABLE_KINDS for the next spawn
 }
 
 export function makeGameState(): GameState {
@@ -57,11 +58,46 @@ export function makeGameState(): GameState {
     comboTtl: 0,
     speedMul: 1,
     shake: 0,
+    spawnPick: 0,
   };
 }
 
 const SINK_W = 200;
 const SINK_H = 150;
+
+// --- Spawnable platform catalog (Part 8 fix) -------------------------------
+// Double-click spawns the selected kind; the mouse wheel cycles the selection.
+// This lets the player re-create the special archetypes after they dissolve,
+// so the field never permanently empties out.
+export const SPAWNABLE_KINDS: WindowKind[] = [
+  WindowKind.PLAIN,
+  WindowKind.TERMINAL,
+  WindowKind.MEDIA,
+  WindowKind.EDITOR,
+  WindowKind.ALERT,
+];
+
+export function spawnableLabel(kind: WindowKind): string {
+  switch (kind) {
+    case WindowKind.PLAIN: return 'scratch.win';
+    case WindowKind.TERMINAL: return 'bash';
+    case WindowKind.MEDIA: return 'player.fm';
+    case WindowKind.EDITOR: return 'notes.txt';
+    case WindowKind.ALERT: return 'Temp Alert';
+    default: return 'window';
+  }
+}
+
+export function hueFor(kind: WindowKind): number {
+  switch (kind) {
+    case WindowKind.PLAIN: return 265;
+    case WindowKind.TERMINAL: return 150;
+    case WindowKind.MEDIA: return 320;
+    case WindowKind.EDITOR: return 50;
+    case WindowKind.ALERT: return 35;
+    default: return 210;
+  }
+}
 
 /**
  * Pick a random landing spot for the sink. It always sits on the RIGHT side of
@@ -92,8 +128,9 @@ export function relocateSink(world: World, g: GameState): void {
   const sink = world.windows.find((w) => w.id === g.sinkId);
   if (!sink) return;
   const pos = randomSinkPosition(world);
-  sink.rect.x = pos.x; sink.rect.y = pos.y;
-  sink.prev.x = pos.x; sink.prev.y = pos.y;   // no phantom velocity from the jump
+  const sx = world.firewallSafeX(pos.x, sink.rect.w);   // defensive: stay off the barrier
+  sink.rect.x = sx; sink.rect.y = pos.y;
+  sink.prev.x = sx; sink.prev.y = pos.y;   // no phantom velocity from the jump
 }
 
 /** Build the level: spawn + sink + a few starter platforms. Idempotent-ish:

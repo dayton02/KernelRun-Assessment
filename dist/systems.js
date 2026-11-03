@@ -54,6 +54,16 @@ export function inputSystem(world) {
         for (const w of world.windows)
             w.drag.grabbed = false;
     }
+    // Click-to-Spring intent (Part 8): resolved INSIDE the fixed step so it is
+    // synchronized with the packet's grounded state. A plain click or Spacebar
+    // sets world.springRequest; we pop the targeted window here.
+    if (world.springRequest.pending) {
+        world.springRequest.pending = false;
+        const sr = world.springRequest;
+        const win = world.topWindowAt(sr.x, sr.y);
+        if (win)
+            springPopWindow(world, win);
+    }
 }
 // ---------------------------------------------------------------------------
 // 2. WindowSystem — apply drag, derive per-window velocity, advance closing.
@@ -484,6 +494,7 @@ export function springPopWindow(world, w) {
         return false;
     w.drag.springCooldown = FLOW.spring.cooldown;
     w.drag.springPop = 0.18; // visual up-nudge duration
+    w.drag.grabbed = false; // a spring pop releases any grab
     const a = world.agent;
     const s = a.state;
     // Only launches the packet if it is currently grounded on THIS window.

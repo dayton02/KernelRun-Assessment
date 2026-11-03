@@ -4,10 +4,9 @@
 
 import { CONFIG, FLOW } from './config.js';
 import { World } from './world.js';
-import { stepWorld, springPopWindow } from './systems.js';
+import { stepWorld } from './systems.js';
 import { render } from './render.js';
-import { WindowKind } from './components.js';
-import { makeGameState, buildLevel, gameSystem, canSpawn } from './game.js';
+import { makeGameState, buildLevel, gameSystem, canSpawn, SPAWNABLE_KINDS, spawnableLabel, hueFor } from './game.js';
 import { initAudio } from './audio.js';
 
 export function boot(canvas: HTMLCanvasElement): void {
@@ -52,41 +51,51 @@ export function boot(canvas: HTMLCanvasElement): void {
     setPos(e); world.pointer.down = false; world.pointer.released = true;
     const dt = performance.now() - pressT;
     const moved = Math.hypot(world.pointer.x - pressX, world.pointer.y - pressY);
-    // Click-to-Spring: a quick, near-stationary click on a window pops it.
+    // Click-to-Spring: a quick, near-stationary click on a window requests a
+    // spring pop. We do NOT call springPopWindow here (that raced the physics
+    // loop); instead we set an intent the InputSystem resolves in-step.
     if (pressWin && dt <= FLOW.spring.clickMaxMs && moved <= FLOW.spring.clickMaxMove) {
-      const hit = world.topWindowAt(pressX, pressY);
-      if (hit) springPopWindow(world, hit);
+      world.springRequest.pending = true;
+      world.springRequest.x = pressX;
+      world.springRequest.y = pressY;
     }
     // release the marquee (it is a transient clutch tool, not a permanent floor)
     world.marquee.active = false;
     marqueeStarted = false;
   });
 
-  // Spacebar also spring-pops the window under the cursor (keyboard affordance).
+  // Spacebar also requests a spring pop on the window under the cursor.
   window.addEventListener('keydown', (e) => {
     if (e.code === 'Space') {
       e.preventDefault();
-      const hit = world.topWindowAt(world.pointer.x, world.pointer.y);
-      if (hit) springPopWindow(world, hit);
+      world.springRequest.pending = true;
+      world.springRequest.x = world.pointer.x;
+      world.springRequest.y = world.pointer.y;
     }
   });
 
-  // Double-click empty desktop to spawn a new platform — gated by the RAM
-  // budget. This is the "players must close/resize trailing windows to make
-  // room for new ones" constraint made interactive.
+  // Mouse wheel cycles which archetype the next spawn will create, so the
+  // player can place terminals, media players, alerts, etc. — not just scratch
+  // windows. This is how the special platforms "come back" after they dissolve.
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const n = SPAWNABLE_KINDS.length;
+    game.spawnPick = (game.spawnPick + (e.deltaY > 0 ? 1 : n - 1)) % n;
+  }, { passive: false });
+
+  // Double-click empty desktop to spawn the currently-selected platform kind —
+  // gated by the RAM budget. Scroll-wheel to change the kind first.
   canvas.addEventListener('dblclick', (e) => {
     setPos(e);
     const onWindow = world.topWindowAt(world.pointer.x, world.pointer.y);
     if (onWindow) return;              // only spawn on empty desktop
     if (!canSpawn(world, game)) return; // RAM (base+leak) full -> blocked
+    const kind = SPAWNABLE_KINDS[game.spawnPick];
     const w = 150, h = 90;
-    // keep the spawned window on one side of the firewall
-    let sx = Math.max(0, world.pointer.x - w / 2);
-    const barL = world.firewallX - world.firewallW / 2;
-    const barR = world.firewallX + world.firewallW / 2;
-    if (world.pointer.x < world.firewallX) sx = Math.min(sx, barL - w);
-    else sx = Math.max(sx, barR);
-    world.spawnWindow(sx, Math.max(40, world.pointer.y - h / 2), w, h, 'scratch.win', 265, WindowKind.PLAIN);
+    // spawnWindow clamps X so the window never straddles the firewall; we only
+    // center it on the cursor here.
+    const sx = Math.max(0, world.pointer.x - w / 2);
+    world.spawnWindow(sx, Math.max(40, world.pointer.y - h / 2), w, h, spawnableLabel(kind), hueFor(kind), kind);
   });
 
   // fixed-step accumulator

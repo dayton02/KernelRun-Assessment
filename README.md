@@ -40,9 +40,14 @@ Full design rationale, ECS layout, state tables, and the physics math are in
 
 ## Controls & flow (Part 8)
 
-- **Click a window** (quick tap) or press **Space** while hovering it — a
-  deterministic **Spring Pop** launches a resting packet straight up. No violent
-  drag needed.
+- **Click a window** (quick tap) the packet is resting on, or press **Space**
+  while hovering it — a deterministic **Spring Pop** launches the packet
+  straight up. No violent drag needed. (Clicking a window the packet isn't on
+  just bumps it — nothing launches.)
+- **Scroll the mouse wheel** to choose which platform the next spawn makes
+  (scratch / terminal / media / notes / alert), then **double-click empty
+  desktop** to place it. This is how you bring the special platforms back after
+  they dissolve.
 - **Drag + flick** a window upward for directional trick shots (dotted
   trajectory arc previews the launch).
 - **Catch cone:** a falling packet gently snaps toward a title bar it's about to

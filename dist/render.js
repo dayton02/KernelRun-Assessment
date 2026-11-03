@@ -1,7 +1,7 @@
 // RenderSystem — draws windows by z-order, then the agent, then the HUD.
 import { FsmState, WindowKind } from './components.js';
 import { GAME } from './config.js';
-import { GamePhase, predictFlickArc, overlapsDropZone } from './game.js';
+import { GamePhase, predictFlickArc, overlapsDropZone, SPAWNABLE_KINDS, spawnableLabel } from './game.js';
 const KIND_TAG = {
     [WindowKind.PLAIN]: '',
     [WindowKind.TERMINAL]: ' [sh]',
@@ -372,6 +372,11 @@ function drawGameHud(ctx, world, g) {
     ctx.fillStyle = '#7f8db0';
     ctx.font = '10px ui-monospace, monospace';
     ctx.fillText(`speed ${(g.speedMul * 100).toFixed(0)}%`, world.width - 230, 74);
+    // next-spawn selector (wheel to cycle, double-click empty desktop to place)
+    const nextKind = SPAWNABLE_KINDS[g.spawnPick];
+    ctx.fillStyle = '#cfd8ec';
+    ctx.font = '11px ui-monospace, monospace';
+    ctx.fillText(`spawn ▸ ${spawnableLabel(nextKind)}  (wheel to change, dbl-click to place)`, 10, world.height - GAME.taskbarH - 10);
     // transient banner
     if (g.messageTtl > 0 && g.message) {
         ctx.globalAlpha = Math.min(1, g.messageTtl * 2);
