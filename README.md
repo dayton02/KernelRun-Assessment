@@ -32,10 +32,11 @@ Full design rationale, ECS layout, state tables, and the physics math are in
 
 ## Anti-ferry rules — you must flick, not carry
 
-- **Inertial slip:** you can't ferry the packet by slowly dragging its window.
-  Drag the carrying window sideways faster than ~120 px/s (without an upward
-  flick) and the packet **loses footing and drops straight down**. The only way
-  to cover horizontal distance is an intentional **upward/diagonal flick**.
+- **Inertial slip:** you can't ferry the packet by dragging its window. Move the
+  carrying window faster than ~120 px/s **in any direction** (without an upward
+  flick) and the packet first **wobbles** (yellow ⚠), then **loses footing and
+  drops**. And even a slow carry won't score — a delivery only counts when the
+  packet arrives **airborne from a real launch**, never while riding a window.
 - **Firewall barrier:** an immovable red stripe splits the desktop down the
   middle. **Windows can't cross it**, but an **airborne packet passes through
   freely**. So the path is: flick off a left-side window → across the firewall
@@ -50,10 +51,8 @@ Full design rationale, ECS layout, state tables, and the physics math are in
   shot while you wind up.
 - **Scroll the mouse wheel** to choose which platform the next spawn makes
   (scratch / terminal / media / notes / alert), then **double-click empty
-  desktop** to place it. This is how you bring the special platforms back after
-  they dissolve.
-- **Drag + flick** a window upward for directional trick shots (dotted
-  trajectory arc previews the launch).
+  desktop** to place it (only when the RAM bar has room). This is how you bring
+  platforms back after they auto-recycle.
 - **Catch cone:** a falling packet gently snaps toward a title bar it's about to
   land on, so good positioning catches it — no pixel-perfect aiming.
 - **Drag on empty wallpaper** to draw a blue **marquee net** — a soft clutch
@@ -65,32 +64,39 @@ Full design rationale, ECS layout, state tables, and the physics math are in
 - **Leapfrog auto-recycle:** the window you just launched *from* dissolves on its
   own once the packet lands elsewhere — refunding RAM and building a combo. No
   hunting for `[X]` buttons.
-- **Elastic slip:** dragging a carrying window sideways too fast first makes the
-  packet **wobble** (yellow ⚠) for a moment; only continued over-speed dragging
-  slips it off. Flick up or steady the drag to recover.
+- **Elastic slip:** dragging a carrying window too fast (any direction) first
+  makes the packet **wobble** (yellow ⚠) for a moment; only continued over-speed
+  dragging slips it off. Flick up or steady the drag to recover.
 - **Streak & difficulty:** each delivery raises a streak multiplier (resets on
   integrity loss) and ramps the packet's base speed, with screen-shake and an
   ascending chord.
 
 ## What to try
 
-- **Drag a title bar** under the packet — it rides the moving platform
-  (position-locked, no runaway).
+- **Slide a window** slowly under the packet to reposition it — but only gently.
+  Dragging the carrying window fast (in any direction) makes the packet **slip
+  off**, and you can't score by carrying it: deliveries only count from an
+  airborne launch.
 - **Flick a window straight up, fast** — restitution-scaled launch, with a
-  dotted **trajectory arc** previewing where it'll go.
-- **`[♪]` Audio Player** auto-pulses ±10px every 500ms — an auto-timed bouncing
-  ledge.
+  dotted **trajectory arc** previewing where it'll go. This is the only way to
+  make the packet jump.
+- **`[♪]` Audio Player** auto-pulses its top edge ±10px every 500ms — an
+  auto-timed bouncing ledge. Land while it's in the raised half for a reliable
+  bounce; no flick needed.
 - **`[!]` Temp Alert** has a 5s countdown; flick it up **before it expires** for
   +50% launch restitution.
-- **Click the red `x`** — ordinary windows fade out (disappearing platform);
-  source/sink can't be closed.
+- **Click the red `x`** to close an ordinary window early (source/sink can't be
+  closed). Mostly you won't need to — the window you launch *from* auto-recycles
+  itself (leapfrog recycling).
 
 Audio cues: blip on landing, ascending chime on launch, alarm on integrity loss,
 triad on delivery. A looping chiptune plays underneath, kept quiet so it never
 masks the effects. Click once to enable audio (browser gesture requirement);
 press **M** to mute the music.
 
-The HUD shows Data Integrity, Memory Usage, the live FSM state, and score.
+The HUD shows Data Integrity, Memory Usage (with live leak), the delivery
+streak, recycle combo, speed ramp, your score (delivered / resets / GC), and the
+next-spawn selector.
 
 ## Credits
 
@@ -100,21 +106,26 @@ The HUD shows Data Integrity, Memory Usage, the live FSM state, and score.
 
 ## Window archetypes (Part 5)
 
-The scene seeds one of each. Each window's software role is its mechanic — see
+Each new level seeds **three random starter platforms** (random kinds, random
+positions) plus the source and goal; scroll the wheel and double-click to spawn
+more of any kind. Each window's software role is its mechanic — see
 [`DESIGN.md`](./DESIGN.md) Part 5 for the full state machines and collision
-overrides.
+overrides. Spawnable kinds: scratch (plain), terminal, media, editor, alert.
 
 - **`[sh]` Terminal** — periodically runs `setgravity low/high` (warps local
   gravity in the column above it) and `echo` (drops decaying text **rungs** you
   can stand on).
-- **`[♪]` Media player** — its title bar pulses on the beat. Land on the **peak
-  of the pulse** for a full super-elastic bounce; mistime it and barely hop.
+- **`[♪]` Media player** — its top edge pulses **±10px every 500ms** (an
+  auto-timed bouncing ledge). Land while it's in the raised half of the pulse
+  for a reliable bounce — no flick needed.
 - **`[txt]` Editor / sticky note** — grab-and-hold "types" content, growing its
   width and shifting footing from **ice → sticky**; fill it past the threshold
   and it turns **buoyant**, floating the packet.
-- **`[ERR]` BSOD modal** — a crumbling platform on a hard timer (standing on it
-  decays it faster). Click its close box for an **explosive launch** — stronger
-  the earlier you dismiss it.
+- **`[!]` Temp Alert** — a 5s countdown then it auto-closes; flick it up
+  **before it expires** for +50% launch restitution.
+- **`[ERR]` BSOD modal** — a crumbling platform with an explosive dismiss. Fully
+  implemented (see `DESIGN.md` Part 5), but **not currently seeded or spawnable**
+  in the Kernel Run level — included for reference.
 
 ## Run it
 
